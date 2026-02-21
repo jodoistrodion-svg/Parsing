@@ -1,7 +1,5 @@
 import asyncio
 import aiohttp
-import sys
-import time
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
@@ -13,20 +11,9 @@ from config import API_TOKEN, LZT_API_KEY, LZT_URL, CHECK_INTERVAL
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-sent_ids = set()
-
 current_min_price = None
 current_max_price = None
 search_active = False
-
-status_message_id = None
-status_chat_id = None
-
-attempt = 0
-found_count = 0
-
-input_mode = None
-temp_messages = []
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -61,22 +48,15 @@ def passes_filters(item):
     return True
 
 # ---------------------- ПОСЛЕДНИЕ 69 ЛОТОВ ----------------------
-async def fetch_last_69():
-    items = await fetch_items()
-    return items[:69]  # просто берём последние 69
-
 async def send_compact_69(message: types.Message):
-    items = await fetch_last_69()
+    items = await fetch_items()
 
-    # фильтруем по цене
-    filtered = [i for i in items if passes_filters(i)]
-
-    # фильтр по miHoYo
-    def is_mihoyo(item):
-        game = item.get("game", "").lower()
-        return any(x in game for x in ["genshin", "star", "honkai", "mihoyo"])
-
-    filtered = [i for i in filtered if is_mihoyo(i)]
+    # если фильтров нет — берём всё
+    global current_min_price, current_max_price
+    if current_min_price is None and current_max_price is None:
+        filtered = items
+    else:
+        filtered = [i for i in items if passes_filters(i)]
 
     if not filtered:
         await message.answer("❗ Лоты не найдены.")
@@ -85,21 +65,20 @@ async def send_compact_69(message: types.Message):
     # группировка по цене
     groups = defaultdict(list)
     for item in filtered:
+        item_id = item.get("item_id") or item.get("id")
+        if not item_id:
+            continue
         price = item.get("price", 0)
-        item_id = item.get("item_id")
         groups[price].append(item_id)
 
     # отправка
     for price, ids in groups.items():
         if len(ids) == 1:
-            # одиночный лот
-            link = f"https://lzt.market/{ids[0]}"
             await message.answer(
-                f"💰 Цена: <b>{price}₽</b>\n🔗 {link}",
+                f"💰 Цена: <b>{price}₽</b>\n🔗 https://lzt.market/{ids[0]}",
                 parse_mode="HTML"
             )
         else:
-            # несколько ссылок одной ценой
             links = "\n".join(f"🔗 https://lzt.market/{i}" for i in ids)
             await message.answer(
                 f"💰 Цена: <b>{price}₽</b>\n{links}",
@@ -108,35 +87,29 @@ async def send_compact_69(message: types.Message):
 
 # ---------------------- МОНИТОРИНГ ----------------------
 async def monitor_new_items(message: types.Message):
-    global search_active, attempt, found_count
+    global search_active
 
-    attempt = 0
-    found_count = 0
+    sent_ids = set()
 
     while search_active:
-        attempt += 1
         items = await fetch_items()
 
         for item in items:
-            item_id = item.get("item_id")
+            item_id = item.get("item_id") or item.get("id")
+            if not item_id:
+                continue
 
             if item_id not in sent_ids and passes_filters(item):
                 sent_ids.add(item_id)
-                found_count += 1
 
                 title = item.get("title", "Без названия")
-                game = item.get("game", "miHoYo")
                 price = item.get("price", 0)
                 link = f"https://lzt.market/{item_id}"
 
-                text = (
-                    f"> <b>{title}</b>\n"
-                    f"> Игра: {game}\n"
-                    f"> Цена: {price}₽\n"
-                    f"> <a href=\"{link}\">Открыть лот</a>"
+                await message.answer(
+                    f"<b>{title}</b>\n💰 {price}₽\n🔗 {link}",
+                    parse_mode="HTML"
                 )
-
-                await message.answer(text, parse_mode="HTML")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
@@ -149,41 +122,31 @@ async def start_cmd(message: types.Message):
 @dp.message()
 async def buttons(message: types.Message):
     global current_min_price, current_max_price, search_active
-    global input_mode, temp_messages
 
     text = message.text
 
-    if input_mode == "min":
-        try:
-            current_min_price = int(text)
-            await message.answer(f"✔ Мин. цена: {current_min_price}₽")
-        except:
-            await message.answer("⚠ Введи число.")
-        input_mode = None
-        return
-
-    if input_mode == "max":
-        try:
-            current_max_price = int(text)
-            await message.answer(f"✔ Макс. цена: {current_max_price}₽")
-        except:
-            await message.answer("⚠ Введи число.")
-        input_mode = None
-        return
-
-    # кнопки
     if text == "💎 Искать все":
         current_min_price = None
         current_max_price = None
         await message.answer("✔ Фильтры сброшены.")
 
     elif text == "💰 Мин. цена":
-        input_mode = "min"
         await message.answer("Введи минимальную цену:")
+        dp["mode"] = "min"
 
     elif text == "💰 Макс. цена":
-        input_mode = "max"
         await message.answer("Введи максимальную цену:")
+        dp["mode"] = "max"
+
+    elif text.isdigit() and dp.get("mode") == "min":
+        current_min_price = int(text)
+        dp["mode"] = None
+        await message.answer(f"✔ Мин. цена: {current_min_price}₽")
+
+    elif text.isdigit() and dp.get("mode") == "max":
+        current_max_price = int(text)
+        dp["mode"] = None
+        await message.answer(f"✔ Макс. цена: {current_max_price}₽")
 
     elif text == "📦 Последние 69 лотов":
         await send_compact_69(message)
@@ -197,7 +160,6 @@ async def buttons(message: types.Message):
             await message.answer("⚠ Поиск уже работает.")
 
     elif text == "🔄 Перезапустить":
-        sent_ids.clear()
         await message.answer("✔ Перезапущено.")
 
     elif text == "🛑 Стоп":
@@ -213,4 +175,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
