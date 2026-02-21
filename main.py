@@ -17,7 +17,6 @@ dp = Dispatcher()
 # ---------------------- НАСТРОЙКИ ----------------------
 HUNTER_INTERVAL = 1.7  # интервал охотника (секунды)
 MAX_MESSAGE_PART = 4000  # безопасный лимит для Telegram HTML сообщений
-SHORT_CARD_MAX = 900  # максимально допустимая длина компактной карточки
 
 # ---------------------- ПЕРСОНАЛЬНЫЕ СТАТЫ (PER-USER) ----------------------
 user_filters = defaultdict(lambda: {"min": None, "max": None, "title": None})
@@ -26,9 +25,6 @@ user_seen_items = defaultdict(set)
 user_hunter_tasks = {}
 user_modes = defaultdict(lambda: None)  # "min", "max", "title"
 user_started = set()  # пользователи, которым уже отправили стартовое сообщение
-
-# Хранилище последних полученных лотов per-user: user_id -> {item_id: item_dict}
-user_last_items = defaultdict(dict)
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -62,8 +58,7 @@ COMMANDS_MENU = (
     "📦 <b>Последние 69 лотов</b> — показать текущие лоты по фильтрам.\n"
     "🚀 <b>Запустить охотника</b> — включить режим охотника только для вас.\n"
     "🛑 <b>Стоп охотника</b> или <b>/stop_hunter</b> — остановить охотника только для вас.\n"
-    "/status — показать текущие фильтры и состояние охотника.\n"
-    "/full <item_id> — получить полное описание конкретного лота.\n\n"
+    "/status — показать текущие фильтры и состояние охотника.\n\n"
     "<i>Режим охотника</i> делает запросы каждые 1.7 секунды и отправляет только новые лоты.\n"
     "Фильтры применяются отдельно для каждого пользователя — если кто-то включит охотника, "
     "это не запустит его у других.\n"
@@ -153,6 +148,10 @@ def format_field_value(value: Any) -> str:
 
 # ---------------------- БЕЗОПАСНАЯ ОТПРАВКА ДЛИННЫХ СООБЩЕНИЙ ----------------------
 async def send_long_message(chat_id: int, text: str, parse_mode: str = "HTML", disable_web_page_preview: bool = True):
+    """
+    Разбивает text на части <= MAX_MESSAGE_PART символов и отправляет последовательно.
+    Возвращает список message ids.
+    """
     MAX_LEN = MAX_MESSAGE_PART
     if len(text) <= MAX_LEN:
         try:
@@ -202,57 +201,7 @@ async def send_long_message(chat_id: int, text: str, parse_mode: str = "HTML", d
         await asyncio.sleep(0.15)
     return sent_ids
 
-# ---------------------- КОМПАКТНАЯ КАРТОЧКА (короткая, безопасная) ----------------------
-def format_item_card_short(item: dict) -> str:
-    """
-    Формируем компактную карточку: ключевые поля, коротко.
-    Если итог > SHORT_CARD_MAX — обрезаем и добавляем подсказку /full <item_id>.
-    """
-    title = item.get("title", "Без названия")
-    price = item.get("price", "—")
-    item_id = item.get("item_id", "—")
-    uid = item.get("uid") or item.get("seller_uid") or item.get("user_id") or "—"
-    region = item.get("region") or item.get("server") or "—"
-    created = item.get("created_at") or item.get("date") or "—"
-
-    lines = []
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎮 <b>{html.escape(str(title))}</b>")
-    if price != "—":
-        lines.append(f"💰 <b>{html.escape(str(price))}₽</b>")
-    else:
-        lines.append("💰 —")
-    lines.append(f"🆔 <b>{html.escape(str(item_id))}</b>")
-    lines.append(f"👤 UID: {html.escape(str(uid))}")
-    lines.append(f"🌍 {html.escape(str(region))}")
-    lines.append(f"🕒 {html.escape(str(created))}")
-
-    # небольшая выборка дополнительных полей, если есть
-    extra_keys = ["stock", "count", "condition", "platform", "tag", "title_extra"]
-    for k in extra_keys:
-        if k in item:
-            lines.append(f"🔸 {html.escape(str(k))}: {html.escape(str(item.get(k)))}")
-
-    # characters
-    chars = extract_characters(title)
-    if chars:
-        for c in chars:
-            lines.append(f"✨ {html.escape(c)}")
-
-    link = f"https://lzt.market/{item_id}" if item_id != "—" else "—"
-    lines.append(f"🔗 <a href=\"{html.escape(link)}\">{html.escape(link)}</a>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-    card = "\n".join(lines)
-    if len(card) > SHORT_CARD_MAX:
-        # обрезаем аккуратно
-        truncated = card[:SHORT_CARD_MAX - 100] + "\n... (обрезано)\n"
-        truncated += f"Для полного описания: /full {html.escape(str(item_id))}"
-        return truncated
-    else:
-        return card
-
-# ---------------------- ПОЛНАЯ КАРТОЧКА (весь JSON, но безопасно обрезаем очень длинные поля) ----------------------
+# ---------------------- ПРЕМИУМ-КАРТОЧКА (ВСЕ ПОЛЯ ИЗ API) ----------------------
 def format_item_card_full(item: dict) -> str:
     lines = []
     title = item.get("title", "Без названия")
@@ -263,15 +212,13 @@ def format_item_card_full(item: dict) -> str:
         lines.append(f"💰 <b>{html.escape(str(price))}₽</b>")
     else:
         lines.append("💰 —")
-
-    # characters
     chars = extract_characters(title)
     if chars:
         for c in chars:
             lines.append(f"✨ {html.escape(c)}")
-
-    # все поля
     for key in sorted(item.keys()):
+        if key in ("title", "price"):
+            continue
         value = item.get(key)
         try:
             if isinstance(value, (dict, list)):
@@ -280,11 +227,10 @@ def format_item_card_full(item: dict) -> str:
                 formatted = str(value)
         except Exception:
             formatted = str(value)
-        # обрезаем очень длинные поля
+        # Обрезаем очень длинные поля, чтобы не перегружать сообщения
         if len(formatted) > 3000:
             formatted = formatted[:3000] + "... (обрезано)"
         lines.append(f"🔹 <b>{html.escape(str(key))}</b>: {html.escape(formatted)}")
-
     item_id = item.get("item_id")
     link = f"https://lzt.market/{item_id}" if item_id else "—"
     lines.append(f"🔗 <a href=\"{html.escape(link)}\">{html.escape(link)}</a>")
@@ -310,19 +256,8 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
             await send_long_message(chat_id, "❗ Лоты есть, но они не проходят фильтры.")
             return
 
-        # сохраняем последние лоты для пользователя (по item_id)
-        user_last_items[user_id].clear()
         for item in filtered:
-            item_id = item.get("item_id")
-            if item_id:
-                user_last_items[user_id][str(item_id)] = item
-
-        # отправляем компактные карточки
-        for item in filtered:
-            card = format_item_card_short(item)
-            # гарантируем, что каждая карточка не превышает лимит
-            if len(card) > MAX_MESSAGE_PART:
-                card = card[:MAX_MESSAGE_PART - 100] + "\n... (обрезано)"
+            card = format_item_card_full(item)
             await send_long_message(chat_id, card)
             await asyncio.sleep(0.25)
     except Exception as e:
@@ -338,12 +273,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 await asyncio.sleep(HUNTER_INTERVAL)
                 continue
 
-            # обновляем локальное хранилище последних лотов (не перезаписываем старые)
-            for item in items:
-                item_id = item.get("item_id")
-                if item_id:
-                    user_last_items[user_id][str(item_id)] = item
-
             for item in items:
                 item_id = item.get("item_id")
                 if not item_id:
@@ -353,7 +282,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if not passes_filters_local(item, user_id):
                     continue
                 user_seen_items[user_id].add(item_id)
-                card = format_item_card_short(item)
+                card = format_item_card_full(item)
                 await send_long_message(chat_id, card)
                 await asyncio.sleep(0.25)
             await asyncio.sleep(HUNTER_INTERVAL)
@@ -397,8 +326,7 @@ async def status_cmd(message: types.Message):
         f"🔸 Макс. цена: {f['max'] if f['max'] is not None else 'не задана'}",
         f"🔸 Фильтр по названию: {html.escape(f['title']) if f['title'] else 'не задан'}",
         f"🔸 Режим охотника: {'ВКЛЮЧЁН' if active else 'ВЫКЛЮЧЕН'}",
-        f"🔸 Отправлено лотов (анти-дубликаты): {len(user_seen_items[user_id])}",
-        f"🔸 Сохранено последних лотов для /full: {len(user_last_items[user_id])}"
+        f"🔸 Отправлено лотов (анти-дубликаты): {len(user_seen_items[user_id])}"
     ]
     await message.answer("\n".join(lines), parse_mode="HTML")
     await safe_delete(message)
@@ -420,47 +348,13 @@ async def stop_hunter_cmd(message: types.Message):
         await message.answer("⚠ Охотник и так не запущен у вас.")
     await safe_delete(message)
 
-# ---------------------- /full <item_id> — вернуть полное описание лота ----------------------
-@dp.message()
-async def full_handler(message: types.Message):
-    text = (message.text or "").strip()
-    if not text.startswith("/full"):
-        return  # не наша команда — пропускаем (будет обработано в buttons)
-    parts = text.split()
-    if len(parts) < 2:
-        await message.answer("Использование: /full <item_id>")
-        await safe_delete(message)
-        return
-    item_id = parts[1]
-    user = message.from_user
-    user_id = user.id
-    chat_id = message.chat.id
-
-    item = user_last_items[user_id].get(item_id)
-    if not item:
-        # попробуем найти по int key
-        item = user_last_items[user_id].get(str(item_id))
-    if not item:
-        await message.answer("❗ Лот с таким item_id не найден в ваших последних лотах. Сначала вызовите 'Последние 69 лотов' или дождитесь охотника.")
-        await safe_delete(message)
-        return
-
-    # формируем полную карточку и отправляем безопасно
-    full_text = format_item_card_full(item)
-    await send_long_message(chat_id, full_text)
-    await safe_delete(message)
-
 # ---------------------- ОБРАБОТКА КНОПОК И ВВОДА (PER-USER) ----------------------
 @dp.message()
 async def buttons(message: types.Message):
-    # если это /full — уже обработано в full_handler (он сработает раньше)
-    text = (message.text or "").strip()
-    if text.startswith("/full"):
-        return
-
     user = message.from_user
     user_id = user.id
     chat_id = message.chat.id
+    text = (message.text or "").strip()
     mode = user_modes[user_id]
 
     try:
@@ -493,7 +387,6 @@ async def buttons(message: types.Message):
             user_filters[user_id]["max"] = None
             user_filters[user_id]["title"] = None
             user_seen_items[user_id].clear()
-            user_last_items[user_id].clear()
             await bot.send_message(chat_id, "🧹 Фильтры сброшены. Охотник начнёт с чистого списка.")
 
         elif text == "💰 Мин. цена":
@@ -515,7 +408,6 @@ async def buttons(message: types.Message):
             if not user_search_active[user_id]:
                 user_search_active[user_id] = True
                 user_seen_items[user_id].clear()
-                user_last_items[user_id].clear()
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
                 await bot.send_message(chat_id, f"🧨 Режим охотника запущен для вас (интервал {HUNTER_INTERVAL} сек).")
@@ -554,7 +446,7 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск персонального бота (охотник per-user, короткие карточки + /full)...")
+    print("[BOT] Запуск персонального бота (охотник per-user, статус, улучшенные карточки)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
