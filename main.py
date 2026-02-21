@@ -22,14 +22,14 @@ URL_LABEL_MAX = 40    # длина метки URL в панели
 # ---------------------- ПЕРСОНАЛЬНЫЕ СТАТЫ (PER-USER) ----------------------
 user_filters = defaultdict(lambda: {"min": None, "max": None, "title": None})
 user_search_active = defaultdict(lambda: False)
-user_seen_items = defaultdict(set)        # анти-дубликаты per-user (item_id)
+user_seen_items = defaultdict(set)        # анти-дубликаты per-user (ключи item_id или хеш)
 user_hunter_tasks = {}
 user_modes = defaultdict(lambda: None)    # "min", "max", "title", "url"
 user_started = set()                      # пользователям, которым уже отправили стартовое сообщение
 
-# теперь поддерживаем список URL и активный индекс
-user_urls = defaultdict(list)             # user_urls[user_id] = [url1, url2, ...] (api-версии)
-user_active_url_index = defaultdict(lambda: None)  # индекс активного URL в списке, None -> использовать LZT_URL
+# поддержка нескольких URL
+user_urls = defaultdict(list)             # user_urls[user_id] = [api_url1, api_url2, ...]
+user_active_url_index = defaultdict(lambda: None)  # индекс активного URL (для отображения), None = базовый LZT_URL
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -92,16 +92,18 @@ def extract_characters(title: str):
     grab("Zenless Zone Zero")
     return result
 
-# ---------------------- ВСПОМОГАТЕЛЬ: получение всех URL для пользователя ----------------------
+# ---------------------- URL HELPERS ----------------------
 def get_all_user_urls(user_id: int) -> list:
     """
     Возвращает список URL для парсинга:
-    - если у пользователя есть URL в user_urls — возвращаем их (api-версии)
+    - если у пользователя есть кастомные URL — возвращаем их + базовый LZT_URL (чтобы парсить и базовый)
     - иначе возвращаем [LZT_URL]
+    Это гарантирует, что бот будет парсить все добавленные URL одновременно.
     """
     urls = user_urls[user_id]
     if urls:
-        return urls.copy()
+        # возвращаем копию списка кастомных URL и добавляем базовый LZT_URL в конец
+        return urls.copy() + [LZT_URL]
     return [LZT_URL]
 
 def get_active_url_label(user_id: int) -> str:
@@ -119,12 +121,11 @@ async def fetch_items(url: str):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=10) as resp:
                 elapsed = time.time() - start_ts
-                status = resp.status
                 text = await resp.text()
 
                 print("\n===== RAW API RESPONSE =====")
                 print("URL:", url)
-                print("STATUS:", status)
+                print("STATUS:", resp.status)
                 print("TEXT:", text[:500])
                 print("============================\n")
 
@@ -161,23 +162,20 @@ def passes_filters_local(item: dict, user_id: int) -> bool:
             return False
     return True
 
-# ---------------------- INLINE КНОПКА ДЛЯ ЛОТА (исправлено) ----------------------
+# ---------------------- INLINE КНОПКА ДЛЯ ЛОТА ----------------------
 def make_item_inline_kb(item: dict) -> InlineKeyboardMarkup:
     """
-    Явно строим inline_keyboard как список списков, чтобы Pydantic не жаловался.
-    Первая строка: кнопка открытия в браузере (если есть item_id).
-    Вторая строка: кнопка сброса активного URL (callback).
+    Явно строим inline_keyboard как список списков.
     """
     item_id = item.get("item_id")
     rows = []
     if item_id:
         url = f"https://lzt.market/{item_id}"
         rows.append([InlineKeyboardButton(text="Открыть в браузере", url=url)])
-    # кнопка сброса активного URL
     rows.append([InlineKeyboardButton(text="Сбросить активный URL", callback_data="reset_active_url")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ---------------------- КОМПАКТНАЯ КАРТОЧКА (с указанием источника) ----------------------
+# ---------------------- КОМПАКТНАЯ КАРТОЧКА ----------------------
 def format_item_card_short(item: dict, source_label: str) -> str:
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
@@ -212,27 +210,25 @@ def format_item_card_short(item: dict, source_label: str) -> str:
         return truncated
     return card
 
-# ---------------------- ВСПОМОГАТЕЛЬ: собрать лоты со всех URL пользователя ----------------------
+# ---------------------- FETCH FROM ALL USER URLS ----------------------
 async def fetch_items_from_all_user_urls(user_id: int):
     """
-    Возвращает список кортежей (item_dict, source_label).
-    Источники: все URL из user_urls[user_id] (каждому присваивается label URL #i),
-    если список пуст — один источник: базовый LZT_URL с label 'базовый API'.
-    В случае ошибки для конкретного URL — возвращаем ошибку в виде строки (error_message).
+    Возвращает список (item, source_label) и список ошибок [(url, error), ...].
+    Парсит все URL из get_all_user_urls(user_id) — это гарантирует, что будут
+    обработаны все кастомные URL и базовый LZT_URL.
     """
     urls = get_all_user_urls(user_id)
     results = []
     errors = []
+    use_custom = bool(user_urls[user_id])
     for idx, url in enumerate(urls):
-        # label: если пользователь имеет кастомные URL (user_urls non-empty), то метка URL #n
-        if user_urls[user_id]:
-            # find index in user's list to get correct numbering (urls may be only user_urls or [LZT_URL])
-            # if urls list equals user_urls[user_id], idx corresponds to index+1
-            try:
-                # if urls is user_urls list, label accordingly
+        # если пользователь добавил кастомные URL, метки для первых len(user_urls) будут URL #i,
+        # а последний элемент — базовый API
+        if use_custom:
+            if idx < len(user_urls[user_id]):
                 label = f"URL #{idx+1}"
-            except Exception:
-                label = f"URL #{idx+1}"
+            else:
+                label = "базовый API"
         else:
             label = "базовый API"
         items, error, _ = await fetch_items(url)
@@ -243,12 +239,11 @@ async def fetch_items_from_all_user_urls(user_id: int):
             results.append((it, label))
     return results, errors
 
-# ---------------------- ПОСЛЕДНИЕ 69 ЛОТОВ (PER-USER) — теперь по всем URL ----------------------
+# ---------------------- SEND 69 (AGGREGATE ACROSS ALL URLS) ----------------------
 async def send_compact_69_for_user(user_id: int, chat_id: int):
     try:
         items_with_sources, errors = await fetch_items_from_all_user_urls(user_id)
         if errors:
-            # покажем ошибки, но продолжим с тем, что есть
             for url, err in errors:
                 await bot.send_message(chat_id, f"❗ Ошибка при запросе {html.escape(url)}:\n{html.escape(str(err))}")
 
@@ -256,16 +251,14 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
             await bot.send_message(chat_id, "❗ Ничего не найдено по всем источникам.")
             return
 
-        # агрегируем по item_id, чтобы не дублировать одинаковые лоты с разных источников
+        # агрегируем по item_id (или по хешу title+price) чтобы убрать дубликаты
         aggregated = {}
         for item, source in items_with_sources:
             iid = item.get("item_id")
-            if not iid:
-                # если нет id — формируем уник ключ по title+price
-                key = f"noid::{item.get('title','')}_{item.get('price','')}"
+            if iid:
+                key = f"id::{iid}"
             else:
-                key = str(iid)
-            # если уже есть — не перезаписываем (оставляем первый источник)
+                key = f"noid::{item.get('title','')}_{item.get('price','')}"
             if key not in aggregated:
                 aggregated[key] = (item, source)
 
@@ -277,7 +270,6 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
             parse_mode="HTML"
         )
 
-        # применяем локальные фильтры и отправляем карточки
         sent_any = False
         for item, source in items_list:
             if not passes_filters_local(item, user_id):
@@ -296,27 +288,23 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Ошибка в send_compact_69:\n{html.escape(str(e))}")
 
-# ---------------------- ОХОТНИК PER-USER (теперь по всем URL) ----------------------
+# ---------------------- HUNTER (PARSE ALL URLs) ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     """
-    Персональный охотник:
-    - при старте помечаем текущие лоты со всех URL как увиденные
-    - в цикле запрашиваем все URL, агрегируем, и отправляем только новые item_id
+    Охотник теперь парсит все URL пользователя (или базовый), агрегирует и отправляет только новые лоты.
     """
-    # при старте помечаем текущие лоты как увиденные
+    # при старте помечаем текущие лоты со всех URL как увиденные
     try:
         items_with_sources, errors = await fetch_items_from_all_user_urls(user_id)
         if items_with_sources:
             for it, _ in items_with_sources:
                 iid = it.get("item_id")
                 if iid:
-                    user_seen_items[user_id].add(str(iid))
+                    user_seen_items[user_id].add(f"id::{iid}")
                 else:
-                    # если нет id — используем хеш по title+price
-                    key = f"noid::{it.get('title','')}_{it.get('price','')}"
-                    user_seen_items[user_id].add(key)
+                    user_seen_items[user_id].add(f"noid::{it.get('title','')}_{it.get('price','')}")
     except Exception:
-        pass  # не критично
+        pass
 
     while user_search_active[user_id]:
         try:
@@ -328,20 +316,17 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 await asyncio.sleep(HUNTER_INTERVAL)
                 continue
 
-            # агрегируем, но при охотнике нам важен каждый item отдельно (с источником)
             for item, source in items_with_sources:
                 iid = item.get("item_id")
                 if iid:
-                    key = str(iid)
+                    key = f"id::{iid}"
                 else:
                     key = f"noid::{item.get('title','')}_{item.get('price','')}"
                 if key in user_seen_items[user_id]:
                     continue
-                # применяем локальные фильтры
                 if not passes_filters_local(item, user_id):
                     user_seen_items[user_id].add(key)
                     continue
-                # новый лот — отправляем
                 user_seen_items[user_id].add(key)
                 card = format_item_card_short(item, source)
                 kb = make_item_inline_kb(item)
@@ -357,7 +342,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             await bot.send_message(chat_id, f"❌ Ошибка в режиме охотника:\n{html.escape(str(e))}")
             await asyncio.sleep(HUNTER_INTERVAL)
 
-# ---------------------- /start ----------------------
+# ---------------------- START ----------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user = message.from_user
@@ -379,7 +364,7 @@ async def start_cmd(message: types.Message):
 
     await safe_delete(message)
 
-# ---------------------- /status (полный) ----------------------
+# ---------------------- STATUS ----------------------
 @dp.message(Command("status"))
 async def status_cmd(message: types.Message):
     user = message.from_user
@@ -388,7 +373,6 @@ async def status_cmd(message: types.Message):
     f = user_filters[user_id]
     active = user_search_active[user_id]
     urls = user_urls[user_id]
-    idx = user_active_url_index[user_id]
     lines = [
         "<b>Текущие настройки</b>",
         f"🔸 Мин. цена: {f['min'] if f['min'] is not None else 'не задана'}",
@@ -402,7 +386,7 @@ async def status_cmd(message: types.Message):
     await message.answer("\n".join(lines), parse_mode="HTML")
     await safe_delete(message)
 
-# ---------------------- КРАТКИЙ СТАТУС (однострочный) ----------------------
+# ---------------------- SHORT STATUS ----------------------
 async def short_status_for_user(user_id: int, chat_id: int):
     active = user_search_active[user_id]
     urls = user_urls[user_id]
@@ -412,7 +396,7 @@ async def short_status_for_user(user_id: int, chat_id: int):
     text = f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источник: {src} | URL в списке: {len(urls)} | Увидено: {seen}"
     await bot.send_message(chat_id, text)
 
-# ---------------------- /stop_hunter ----------------------
+# ---------------------- STOP HUNTER ----------------------
 @dp.message(Command("stop_hunter"))
 async def stop_hunter_cmd(message: types.Message):
     user = message.from_user
@@ -429,12 +413,8 @@ async def stop_hunter_cmd(message: types.Message):
         await message.answer("⚠ Охотник и так не запущен у вас.")
     await safe_delete(message)
 
-# ---------------------- ПАНЕЛЬ: список URL (inline) ----------------------
+# ---------------------- BUILD URLS PANEL ----------------------
 def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
-    """
-    Явно строим inline_keyboard как список списков.
-    Для каждого URL добавляем две строки: выбрать и удалить.
-    """
     urls = user_urls[user_id]
     rows = []
     if not urls:
@@ -449,7 +429,7 @@ def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Отмена", callback_data="noop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ---------------------- ОБРАБОТКА ТЕКСТОВ И КНОПОК ----------------------
+# ---------------------- TEXT BUTTONS HANDLER ----------------------
 @dp.message()
 async def buttons(message: types.Message):
     user = message.from_user
@@ -489,12 +469,10 @@ async def buttons(message: types.Message):
             return
 
         if mode == "url":
-            # пользователь прислал URL с сайта (или слово 'сброс' для очистки активного)
             user_modes[user_id] = None
             url_text = text.strip()
 
             if url_text.lower() == "сброс" or url_text == "":
-                # очищаем активный индекс (не удаляем список)
                 user_active_url_index[user_id] = None
                 await bot.send_message(chat_id, "✔ Активный URL сброшен. Используется базовый API.")
                 await safe_delete(message)
@@ -509,7 +487,7 @@ async def buttons(message: types.Message):
             url_text = url_text.replace("://lzt.market", "://api.lzt.market")
             url_text = url_text.replace("://www.lzt.market", "://api.lzt.market")
 
-            # добавляем в список и делаем активным (поддержка нескольких URL)
+            # добавляем в список (поддержка нескольких URL) и делаем активным
             user_urls[user_id].append(url_text)
             user_active_url_index[user_id] = len(user_urls[user_id]) - 1
             user_seen_items[user_id].clear()
@@ -563,11 +541,14 @@ async def buttons(message: types.Message):
             await bot.send_message(chat_id, "✔ Активный URL сброшен. Используется базовый LZT_URL.")
 
         elif text == "🔧 Тест API":
-            # тестируем все URL (или базовый)
             urls = get_all_user_urls(user_id)
             await bot.send_message(chat_id, "🔎 Тестирую все источники...")
             for idx, url in enumerate(urls):
-                label = f"URL #{idx+1}" if user_urls[user_id] else "базовый API"
+                # label: если есть кастомные URL, первые len(user_urls) — URL #i, последний — базовый API
+                if user_urls[user_id] and idx < len(user_urls[user_id]):
+                    label = f"URL #{idx+1}"
+                else:
+                    label = "базовый API"
                 items, error, elapsed = await fetch_items(url)
                 if error:
                     await bot.send_message(chat_id, f"❗ {label} ({html.escape(url)}): {html.escape(str(error))} — {elapsed:.2f}s")
@@ -581,16 +562,14 @@ async def buttons(message: types.Message):
             if not user_search_active[user_id]:
                 user_seen_items[user_id].clear()
                 try:
-                    # помечаем текущие лоты со всех URL как увиденные
                     items_with_sources, errors = await fetch_items_from_all_user_urls(user_id)
                     if items_with_sources:
                         for it, _ in items_with_sources:
                             iid = it.get("item_id")
                             if iid:
-                                user_seen_items[user_id].add(str(iid))
+                                user_seen_items[user_id].add(f"id::{iid}")
                             else:
-                                key = f"noid::{it.get('title','')}_{it.get('price','')}"
-                                user_seen_items[user_id].add(key)
+                                user_seen_items[user_id].add(f"noid::{it.get('title','')}_{it.get('price','')}")
                 except Exception:
                     pass
 
@@ -635,13 +614,12 @@ async def buttons(message: types.Message):
         await bot.send_message(chat_id, f"❌ Ошибка в обработке кнопок:\n{html.escape(str(e))}")
         await safe_delete(message)
 
-# ---------------------- CALLBACKS для панели URL и inline-кнопок ----------------------
+# ---------------------- CALLBACKS ----------------------
 @dp.callback_query()
 async def handle_callbacks(call: types.CallbackQuery):
     data = call.data or ""
     user = call.from_user
     user_id = user.id
-    chat_id = call.message.chat.id if call.message else user_id
 
     try:
         if data.startswith("useurl:"):
@@ -664,7 +642,6 @@ async def handle_callbacks(call: types.CallbackQuery):
             urls = user_urls[user_id]
             if 0 <= idx < len(urls):
                 removed = urls.pop(idx)
-                # скорректируем активный индекс
                 if user_active_url_index[user_id] is not None:
                     if user_active_url_index[user_id] == idx:
                         user_active_url_index[user_id] = None
@@ -698,15 +675,14 @@ async def handle_callbacks(call: types.CallbackQuery):
                 pass
             return
 
-        # неизвестный callback
         await call.answer()
-    except Exception as e:
+    except Exception:
         try:
             await call.answer("Ошибка обработки.", show_alert=True)
         except Exception:
             pass
 
-# ---------------------- УДАЛЕНИЕ СООБЩЕНИЯ ----------------------
+# ---------------------- SAFE DELETE ----------------------
 async def safe_delete(message: types.Message):
     try:
         await message.delete()
@@ -715,7 +691,7 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск бота: multi-URL (по всем URL одновременно), панель URL, тест API, inline кнопки...")
+    print("[BOT] Запуск бота: парсинг по всем URL пользователя одновременно (включая базовый LZT_URL)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
