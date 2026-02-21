@@ -15,6 +15,7 @@ current_min_price = None
 current_max_price = None
 search_active = False
 
+
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
     return ReplyKeyboardMarkup(
@@ -29,13 +30,19 @@ def main_kb():
         resize_keyboard=True
     )
 
+
 # ---------------------- ПАРСИНГ ----------------------
 async def fetch_items():
     headers = {"Authorization": f"Bearer {LZT_API_KEY}"}
+
     async with aiohttp.ClientSession() as session:
         async with session.get(LZT_URL, headers=headers) as resp:
             data = await resp.json()
-            return data.get("data", [])
+
+            # структура ответа:
+            # { "data": { "items": [ ... ] } }
+            return data.get("data", {}).get("items", [])
+
 
 def passes_filters(item):
     price = item.get("price", 0)
@@ -47,12 +54,14 @@ def passes_filters(item):
 
     return True
 
+
 # ---------------------- ПОСЛЕДНИЕ 69 ЛОТОВ ----------------------
 async def send_compact_69(message: types.Message):
     items = await fetch_items()
 
-    # если фильтров нет — берём всё
     global current_min_price, current_max_price
+
+    # если фильтров нет — берём всё
     if current_min_price is None and current_max_price is None:
         filtered = items
     else:
@@ -64,10 +73,12 @@ async def send_compact_69(message: types.Message):
 
     # группировка по цене
     groups = defaultdict(list)
+
     for item in filtered:
         item_id = item.get("item_id") or item.get("id")
         if not item_id:
             continue
+
         price = item.get("price", 0)
         groups[price].append(item_id)
 
@@ -84,6 +95,7 @@ async def send_compact_69(message: types.Message):
                 f"💰 Цена: <b>{price}₽</b>\n{links}",
                 parse_mode="HTML"
             )
+
 
 # ---------------------- МОНИТОРИНГ ----------------------
 async def monitor_new_items(message: types.Message):
@@ -113,10 +125,12 @@ async def monitor_new_items(message: types.Message):
 
         await asyncio.sleep(CHECK_INTERVAL)
 
+
 # ---------------------- START ----------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer("⭐️ Главное меню:", reply_markup=main_kb())
+
 
 # ---------------------- КНОПКИ ----------------------
 @dp.message()
@@ -125,28 +139,32 @@ async def buttons(message: types.Message):
 
     text = message.text
 
+    # ввод чисел
+    if dp.get("mode") == "min" and text.isdigit():
+        current_min_price = int(text)
+        dp["mode"] = None
+        await message.answer(f"✔ Мин. цена: {current_min_price}₽")
+        return
+
+    if dp.get("mode") == "max" and text.isdigit():
+        current_max_price = int(text)
+        dp["mode"] = None
+        await message.answer(f"✔ Макс. цена: {current_max_price}₽")
+        return
+
+    # кнопки
     if text == "💎 Искать все":
         current_min_price = None
         current_max_price = None
         await message.answer("✔ Фильтры сброшены.")
 
     elif text == "💰 Мин. цена":
-        await message.answer("Введи минимальную цену:")
         dp["mode"] = "min"
+        await message.answer("Введи минимальную цену:")
 
     elif text == "💰 Макс. цена":
-        await message.answer("Введи максимальную цену:")
         dp["mode"] = "max"
-
-    elif text.isdigit() and dp.get("mode") == "min":
-        current_min_price = int(text)
-        dp["mode"] = None
-        await message.answer(f"✔ Мин. цена: {current_min_price}₽")
-
-    elif text.isdigit() and dp.get("mode") == "max":
-        current_max_price = int(text)
-        dp["mode"] = None
-        await message.answer(f"✔ Макс. цена: {current_max_price}₽")
+        await message.answer("Введи максимальную цену:")
 
     elif text == "📦 Последние 69 лотов":
         await send_compact_69(message)
@@ -168,6 +186,7 @@ async def buttons(message: types.Message):
 
     elif text == "◀️ Назад":
         await message.answer("⭐️ Главное меню:", reply_markup=main_kb())
+
 
 # ---------------------- RUN ----------------------
 async def main():
