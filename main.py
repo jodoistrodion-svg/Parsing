@@ -3,7 +3,6 @@ import json
 import aiohttp
 import html
 from collections import defaultdict
-from typing import Any
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -16,14 +15,15 @@ dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
 HUNTER_INTERVAL = 1.7  # интервал охотника (секунды)
+SHORT_CARD_MAX = 900  # максимально допустимая длина компактной карточки
 
 # ---------------------- ПЕРСОНАЛЬНЫЕ СТАТЫ (PER-USER) ----------------------
 user_filters = defaultdict(lambda: {"min": None, "max": None, "title": None})
 user_search_active = defaultdict(lambda: False)
-user_seen_items = defaultdict(set)
+user_seen_items = defaultdict(set)        # анти-дубликаты per-user
 user_hunter_tasks = {}
-user_modes = defaultdict(lambda: None)  # "min", "max", "title"
-user_started = set()  # пользователи, которым уже отправили стартовое сообщение
+user_modes = defaultdict(lambda: None)    # "min", "max", "title"
+user_started = set()                      # пользователям, которым уже отправили стартовое сообщение
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -55,7 +55,7 @@ COMMANDS_MENU = (
     "💰 <b>Макс. цена</b> — ввести максимальную цену (число).\n"
     "🔤 <b>Фильтр по названию</b> — ввести слово/фразу для поиска в названии.\n"
     "📦 <b>Последние 69 лотов</b> — показать текущие лоты по фильтрам.\n"
-    "🚀 <b>Запустить охотника</b> — включить режим охотника только для вас.\n"
+    "🚀 <b>Запустить охотника</b> — включить/выключить режим охотника только для вас.\n"
     "🛑 <b>Стоп охотника</b> или <b>/stop_hunter</b> — остановить охотника только для вас.\n"
     "/status — показать текущие фильтры и состояние охотника.\n\n"
     "<i>Режим охотника</i> делает запросы каждые 1.7 секунды и отправляет только новые лоты.\n"
@@ -134,44 +134,41 @@ def passes_filters_local(item: dict, user_id: int) -> bool:
             return False
     return True
 
-# ---------------------- УТИЛИТА: ПРЕОБРАЗОВАНИЕ ПОЛЕЙ В HTML ----------------------
-def format_field_value(value: Any) -> str:
-    if isinstance(value, (dict, list)):
-        try:
-            s = json.dumps(value, ensure_ascii=False)
-        except Exception:
-            s = str(value)
-    else:
-        s = str(value)
-    return html.escape(s)
-
-# ---------------------- ПРЕМИУМ-КАРТОЧКА (ВСЕ ПОЛЯ ИЗ API) ----------------------
-def format_item_card_full(item: dict) -> str:
-    lines = []
+# ---------------------- КОМПАКТНАЯ КАРТОЧКА ----------------------
+def format_item_card_short(item: dict) -> str:
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
+    item_id = item.get("item_id", "—")
+    uid = item.get("uid") or item.get("seller_uid") or item.get("user_id") or "—"
+    region = item.get("region") or item.get("server") or "—"
+    created = item.get("created_at") or item.get("date") or "—"
+
+    lines = []
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎮 <b>{html.escape(title)}</b>")
-    lines.append(f"💰 <b>{html.escape(str(price))}₽</b>" if price != "—" else "💰 —")
-    # characters block
+    lines.append(f"🎮 <b>{html.escape(str(title))}</b>")
+    if price != "—":
+        lines.append(f"💰 <b>{html.escape(str(price))}₽</b>")
+    else:
+        lines.append("💰 —")
+    lines.append(f"🆔 <b>{html.escape(str(item_id))}</b>")
+    lines.append(f"👤 UID: {html.escape(str(uid))}")
+    lines.append(f"🌍 {html.escape(str(region))}")
+    lines.append(f"🕒 {html.escape(str(created))}")
+
     chars = extract_characters(title)
     if chars:
         for c in chars:
             lines.append(f"✨ {html.escape(c)}")
-    # include all fields from item, sorted for stability
-    for key in sorted(item.keys()):
-        # skip title and price already shown
-        if key in ("title", "price"):
-            continue
-        value = item.get(key)
-        formatted = format_field_value(value)
-        lines.append(f"🔹 <b>{html.escape(str(key))}</b>: {formatted}")
-    # link at the end
-    item_id = item.get("item_id")
-    link = f"https://lzt.market/{item_id}" if item_id else "—"
+
+    link = f"https://lzt.market/{item_id}" if item_id != "—" else "—"
     lines.append(f"🔗 <a href=\"{html.escape(link)}\">{html.escape(link)}</a>")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    return "\n".join(lines)
+
+    card = "\n".join(lines)
+    if len(card) > SHORT_CARD_MAX:
+        truncated = card[:SHORT_CARD_MAX - 100] + "\n... (обрезано)"
+        return truncated
+    return card
 
 # ---------------------- ПОСЛЕДНИЕ 69 ЛОТОВ (PER-USER) ----------------------
 async def send_compact_69_for_user(user_id: int, chat_id: int):
@@ -180,22 +177,44 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
         if error:
             await bot.send_message(chat_id, f"❗ Ошибка API:\n{error}")
             return
+
         await bot.send_message(chat_id, f"ℹ API вернул лотов: <b>{len(items)}</b>", parse_mode="HTML")
+
         if not items:
             await bot.send_message(chat_id, "❗ API вернул пустой список.")
             return
+
         filtered = [i for i in items if passes_filters_local(i, user_id)]
         if not filtered:
             await bot.send_message(chat_id, "❗ Лоты есть, но они не проходят фильтры.")
             return
+
+        # отправляем компактные карточки с паузой
         for item in filtered:
-            card = format_item_card_full(item)
+            card = format_item_card_short(item)
             await bot.send_message(chat_id, card, parse_mode="HTML", disable_web_page_preview=True)
+            await asyncio.sleep(0.25)
     except Exception as e:
         await bot.send_message(chat_id, f"❌ Ошибка в send_compact_69:\n{e}")
 
-# ---------------------- ОХОТНИК PER-USER ----------------------
+# ---------------------- ОХОТНИК PER-USER (без сбора всех данных) ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
+    """
+    Персональный охотник:
+    - при старте помечаем текущие лоты как увиденные (чтобы не спамить)
+    - отправляем только новые item_id, применяя фильтры per-user
+    """
+    # при старте помечаем текущие лоты как увиденные
+    try:
+        items, error = await fetch_items()
+        if not error and isinstance(items, list):
+            for it in items:
+                iid = it.get("item_id")
+                if iid:
+                    user_seen_items[user_id].add(iid)
+    except Exception:
+        pass  # не критично
+
     while user_search_active[user_id]:
         try:
             items, error = await fetch_items()
@@ -203,6 +222,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 await bot.send_message(chat_id, f"❗ Ошибка API (охотник):\n{error}")
                 await asyncio.sleep(HUNTER_INTERVAL)
                 continue
+
             for item in items:
                 item_id = item.get("item_id")
                 if not item_id:
@@ -210,10 +230,14 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if item_id in user_seen_items[user_id]:
                     continue
                 if not passes_filters_local(item, user_id):
+                    # помечаем как увиденное, чтобы не проверять снова
+                    user_seen_items[user_id].add(item_id)
                     continue
+                # новый лот, отправляем компактную карточку
                 user_seen_items[user_id].add(item_id)
-                card = format_item_card_full(item)
+                card = format_item_card_short(item)
                 await bot.send_message(chat_id, card, parse_mode="HTML", disable_web_page_preview=True)
+                await asyncio.sleep(0.25)  # пауза между отправками
             await asyncio.sleep(HUNTER_INTERVAL)
         except asyncio.CancelledError:
             break
@@ -221,12 +245,13 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             await bot.send_message(chat_id, f"❌ Ошибка в режиме охотника:\n{e}")
             await asyncio.sleep(HUNTER_INTERVAL)
 
-# ---------------------- /start (отправляем стартовое сообщение один раз пользователю) ----------------------
+# ---------------------- /start ----------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user = message.from_user
     user_id = user.id
     chat_id = message.chat.id
+
     if user_id not in user_started:
         try:
             await message.answer(START_INFO)
@@ -238,10 +263,12 @@ async def start_cmd(message: types.Message):
                 pass
         user_started.add(user_id)
     else:
+        # при повторном нажатии /start просто показываем меню (не дублируем стартовые тексты)
         await message.answer("⭐ Главное меню:", reply_markup=main_kb())
+
     await safe_delete(message)
 
-# ---------------------- /status (показать текущие фильтры и состояние) ----------------------
+# ---------------------- /status ----------------------
 @dp.message(Command("status"))
 async def status_cmd(message: types.Message):
     user = message.from_user
@@ -260,7 +287,7 @@ async def status_cmd(message: types.Message):
     await message.answer("\n".join(lines), parse_mode="HTML")
     await safe_delete(message)
 
-# ---------------------- /stop_hunter (команда для остановки охотника) ----------------------
+# ---------------------- /stop_hunter ----------------------
 @dp.message(Command("stop_hunter"))
 async def stop_hunter_cmd(message: types.Message):
     user = message.from_user
@@ -287,6 +314,7 @@ async def buttons(message: types.Message):
     mode = user_modes[user_id]
 
     try:
+        # режимы ввода
         if mode == "min" and text.isdigit():
             user_filters[user_id]["min"] = int(text)
             user_modes[user_id] = None
@@ -311,6 +339,7 @@ async def buttons(message: types.Message):
             await safe_delete(message)
             return
 
+        # кнопки
         if text == "💎 Искать все":
             user_filters[user_id]["min"] = None
             user_filters[user_id]["max"] = None
@@ -334,14 +363,33 @@ async def buttons(message: types.Message):
             await send_compact_69_for_user(user_id, chat_id)
 
         elif text == "🚀 Запустить охотника":
+            # теперь кнопка работает как toggle: если не запущен — запускаем, если запущен — останавливаем
             if not user_search_active[user_id]:
-                user_search_active[user_id] = True
+                # запускаем: помечаем текущие лоты как увиденные, чтобы не спамить
                 user_seen_items[user_id].clear()
+                try:
+                    items, error = asyncio.run(fetch_items_sync())
+                    if not error and isinstance(items, list):
+                        for it in items:
+                            iid = it.get("item_id")
+                            if iid:
+                                user_seen_items[user_id].add(iid)
+                except Exception:
+                    # если не получилось синхронно, просто продолжим — охотник при старте попытается пометить
+                    pass
+
+                user_search_active[user_id] = True
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
                 await bot.send_message(chat_id, f"🧨 Режим охотника запущен для вас (интервал {HUNTER_INTERVAL} сек).")
             else:
-                await bot.send_message(chat_id, "⚠ Охотник уже работает у вас.")
+                # если уже запущен — выключаем
+                user_search_active[user_id] = False
+                task = user_hunter_tasks.get(user_id)
+                if task:
+                    task.cancel()
+                    user_hunter_tasks.pop(user_id, None)
+                await bot.send_message(chat_id, "🛑 Охотник остановлен у вас (по повторному нажатию).")
 
         elif text == "🛑 Стоп охотника":
             if user_search_active[user_id]:
@@ -366,6 +414,14 @@ async def buttons(message: types.Message):
         await bot.send_message(chat_id, f"❌ Ошибка в обработке кнопок:\n{html.escape(str(e))}")
         await safe_delete(message)
 
+# ---------------------- ВСПОМОГАТЕЛЬ: синхронный вызов fetch_items для пометки при старте ----------------------
+def fetch_items_sync():
+    """
+    Вспомогательная обёртка для вызова fetch_items в синхронном контексте.
+    Используется только для быстрой пометки при нажатии кнопки (не критично).
+    """
+    return asyncio.get_event_loop().run_until_complete(fetch_items())
+
 # ---------------------- УДАЛЕНИЕ СООБЩЕНИЯ ----------------------
 async def safe_delete(message: types.Message):
     try:
@@ -375,7 +431,7 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск персонального бота (охотник per-user, статус, улучшенные карточки)...")
+    print("[BOT] Запуск персонального бота (охотник per-user, без сбора всех данных)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
