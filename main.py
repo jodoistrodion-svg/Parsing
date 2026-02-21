@@ -40,8 +40,8 @@ async def fetch_items():
             data = await resp.json()
 
             # структура ответа:
-            # { "data": { "items": [ ... ] } }
-            return data.get("data", {}).get("items", [])
+            # { "data": [ ... ] }
+            return data.get("data", [])
 
 
 def passes_filters(item):
