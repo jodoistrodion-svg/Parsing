@@ -575,7 +575,10 @@ async def handle_callbacks(call: types.CallbackQuery):
             if 0 <= idx < len(urls):
                 user_active_url_index[user_id] = idx
                 user_seen_items[user_id].clear()
-                await call.message.edit_text(f"✔ Активный URL установлен: #{idx+1}\n{urls[idx]}")
+                try:
+                    await call.message.edit_text(f"✔ Активный URL установлен: #{idx+1}\n{urls[idx]}")
+                except Exception:
+                    pass
                 await call.answer("Активный URL установлен.")
             else:
                 await call.answer("URL не найден.", show_alert=True)
@@ -593,7 +596,10 @@ async def handle_callbacks(call: types.CallbackQuery):
                     elif user_active_url_index[user_id] > idx:
                         user_active_url_index[user_id] -= 1
                 user_seen_items[user_id].clear()
-                await call.message.edit_text(f"✔ URL #{idx+1} удалён:\n{removed}")
+                try:
+                    await call.message.edit_text(f"✔ URL #{idx+1} удалён:\n{removed}")
+                except Exception:
+                    pass
                 await call.answer("URL удалён.")
             else:
                 await call.answer("URL не найден.", show_alert=True)
