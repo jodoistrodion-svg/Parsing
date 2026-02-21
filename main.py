@@ -17,7 +17,12 @@ current_min_price = None
 current_max_price = None
 current_title_filter = None
 
+# Режим охотника
 search_active = False
+HUNTER_INTERVAL = 1.7  # твои 1.7 секунды
+
+# Глобальный набор уже увиденных лотов (анти-дубликаты в рамках запуска)
+seen_items = set()
 
 
 # ---------------------- КЛАВИАТУРА ----------------------
@@ -28,8 +33,8 @@ def main_kb():
             [KeyboardButton(text="💰 Мин. цена"), KeyboardButton(text="💰 Макс. цена")],
             [KeyboardButton(text="🔤 Фильтр по названию")],
             [KeyboardButton(text="📦 Последние 69 лотов")],
-            [KeyboardButton(text="🚀 Запустить поиск")],
-            [KeyboardButton(text="🛑 Стоп")],
+            [KeyboardButton(text="🚀 Запустить охотника")],
+            [KeyboardButton(text="🛑 Стоп охотника")],
             [KeyboardButton(text="◀️ Назад")]
         ],
         resize_keyboard=True
@@ -181,18 +186,23 @@ async def send_compact_69(message: types.Message):
         await message.answer(f"❌ Ошибка в send_compact_69:\n{e}")
 
 
-# ---------------------- МОНИТОРИНГ ----------------------
-async def monitor_new_items(message: types.Message):
-    global search_active
-    sent = set()
+# ---------------------- РЕЖИМ ОХОТНИКА ----------------------
+async def hunter_loop(message: types.Message):
+    """
+    Режим охотника:
+    - запрос каждые 1.7 сек
+    - отправка только новых лотов
+    - авто-рестарт при ошибках
+    """
+    global search_active, seen_items
 
     while search_active:
         try:
             items, error = await fetch_items()
 
             if error:
-                await message.answer(f"❗ Ошибка API:\n{error}")
-                await asyncio.sleep(CHECK_INTERVAL)
+                await message.answer(f"❗ Ошибка API (охотник):\n{error}")
+                await asyncio.sleep(HUNTER_INTERVAL)
                 continue
 
             for item in items:
@@ -200,16 +210,23 @@ async def monitor_new_items(message: types.Message):
                 if not item_id:
                     continue
 
-                if item_id not in sent and passes_filters_local(item):
-                    sent.add(item_id)
-                    card = format_item_card(item)
-                    await message.answer(card, parse_mode="HTML", disable_web_page_preview=True)
+                # анти-дубликаты
+                if item_id in seen_items:
+                    continue
 
-            await asyncio.sleep(CHECK_INTERVAL)
+                if not passes_filters_local(item):
+                    continue
+
+                seen_items.add(item_id)
+
+                card = format_item_card(item)
+                await message.answer(card, parse_mode="HTML", disable_web_page_preview=True)
+
+            await asyncio.sleep(HUNTER_INTERVAL)
 
         except Exception as e:
-            await message.answer(f"❌ Ошибка в мониторинге:\n{e}")
-            await asyncio.sleep(CHECK_INTERVAL)
+            await message.answer(f"❌ Ошибка в режиме охотника:\n{e}")
+            await asyncio.sleep(HUNTER_INTERVAL)
 
 
 # ---------------------- START ----------------------
@@ -221,7 +238,7 @@ async def start_cmd(message: types.Message):
 # ---------------------- КНОПКИ + АВТО-УДАЛЕНИЕ ----------------------
 @dp.message()
 async def buttons(message: types.Message):
-    global current_min_price, current_max_price, current_title_filter, search_active
+    global current_min_price, current_max_price, current_title_filter, search_active, seen_items
 
     user_msg = message
 
@@ -229,6 +246,7 @@ async def buttons(message: types.Message):
         text = message.text or ""
         mode = getattr(dp, "mode", None)
 
+        # режимы ввода
         if mode == "min" and text.isdigit():
             current_min_price = int(text)
             dp.mode = None
@@ -253,11 +271,13 @@ async def buttons(message: types.Message):
             await safe_delete(user_msg)
             return
 
+        # кнопки
         if text == "💎 Искать все":
             current_min_price = None
             current_max_price = None
             current_title_filter = None
-            await message.answer("🧹 Фильтры сброшены.")
+            seen_items.clear()
+            await message.answer("🧹 Фильтры сброшены. Охотник начнёт с чистого списка.")
 
         elif text == "💰 Мин. цена":
             dp.mode = "min"
@@ -274,21 +294,26 @@ async def buttons(message: types.Message):
         elif text == "📦 Последние 69 лотов":
             await send_compact_69(message)
 
-        elif text == "🚀 Запустить поиск":
+        elif text == "🚀 Запустить охотника":
             if not search_active:
                 search_active = True
-                asyncio.create_task(monitor_new_items(message))
-                await message.answer("🔎 Поиск запущен.")
+                seen_items.clear()
+                asyncio.create_task(hunter_loop(message))
+                await message.answer("🧨 Режим охотника запущен (интервал 1.7 сек).")
             else:
-                await message.answer("⚠ Поиск уже работает.")
+                await message.answer("⚠ Охотник уже работает.")
 
-        elif text == "🛑 Стоп":
-            search_active = False
-            await message.answer("🛑 Поиск остановлен.")
+        elif text == "🛑 Стоп охотника":
+            if search_active:
+                search_active = False
+                await message.answer("🛑 Охотник остановлен.")
+            else:
+                await message.answer("⚠ Охотник и так не запущен.")
 
         elif text == "◀️ Назад":
             await message.answer("⭐ Главное меню:", reply_markup=main_kb())
 
+        # авто-удаление любых текстов пользователя (кроме /команд)
         if text and not text.startswith("/"):
             await asyncio.sleep(0.5)
             await safe_delete(user_msg)
@@ -307,7 +332,7 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск бота...")
+    print("[BOT] Запуск бота с режимом охотника 1.7 сек...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
