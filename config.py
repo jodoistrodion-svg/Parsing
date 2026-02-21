@@ -2,8 +2,9 @@ API_TOKEN = "8511008734:AAGaxwKQYQAFQD-EFRCp5IbpNf-Uxt91NYI"
 LZT_API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MTYwMzgxNCwianRpIjoiOTM0MzY3Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MjkyODM4MTR9.C1pcTXAoG5AhQfSK9k3iXxGjCG7m2NN2qfIUAloUaUzrr8hrgb5qi9HGX-Tz4Ax3YUgJn469ClaaJcu-ElYkApHy9Wi8VvQyOnoSavALTuiKyZUGIRZq_-kpr1qr8hrdqWuuRvnhlxp169ABWD_Ong0nV61N_CmeeIR9iPsEVtw"
 
 # URL категории miHoYo
-LZT_URL = "https://api.lzt.market/category/mihoyo?per_page=69&sort_by=date&order=desc"
+LZT_URL = "https://api.lzt.market/category/mihoyo/items?per_page=69&sort_by=date&order=desc"
 
 # Интервал проверки новых лотов (в секундах)
 CHECK_INTERVAL = 5
+
 
