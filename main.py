@@ -2,18 +2,17 @@ import asyncio
 import json
 import aiohttp
 from collections import defaultdict
-from urllib.parse import urlencode
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-from config import API_TOKEN, LZT_API_KEY, LZT_BASE_URL, CHECK_INTERVAL
+from config import API_TOKEN, LZT_API_KEY, LZT_URL, CHECK_INTERVAL
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# фильтры
+# Фильтры
 current_min_price = None
 current_max_price = None
 current_title_filter = None
@@ -37,24 +36,7 @@ def main_kb():
     )
 
 
-# ---------------------- ВСПОМОГАТЕЛЬНОЕ ----------------------
-def build_query_params():
-    params = {
-        "page": 1,
-        "per_page": 69,
-        "order_by": "date_to_down",
-    }
-
-    if current_min_price is not None:
-        params["pmin"] = current_min_price
-    if current_max_price is not None:
-        params["pmax"] = current_max_price
-    if current_title_filter:
-        params["title"] = current_title_filter
-
-    return params
-
-
+# ---------------------- ПАРСЕР ПЕРСОНАЖЕЙ ----------------------
 def extract_characters(title: str):
     result = []
 
@@ -79,18 +61,20 @@ def extract_characters(title: str):
 
 # ---------------------- API LZT ----------------------
 async def fetch_items():
+    """
+    Работает строго с твоим URL:
+    https://api.lzt.market/mihoyo?per_page=69&order_by=date_to_down
+    """
     headers = {"Authorization": f"Bearer {LZT_API_KEY}"}
-    params = build_query_params()
-    url = f"{LZT_BASE_URL}?{urlencode(params)}"
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
+            async with session.get(LZT_URL, headers=headers, timeout=10) as resp:
                 status = resp.status
                 text = await resp.text()
 
                 print("\n===== RAW API RESPONSE =====")
-                print("URL:", url)
+                print("URL:", LZT_URL)
                 print("STATUS:", status)
                 print("TEXT:", text[:500])
                 print("============================\n")
@@ -120,6 +104,7 @@ async def fetch_items():
         return [], f"❌ Неизвестная ошибка: {e}"
 
 
+# ---------------------- ЛОКАЛЬНЫЕ ФИЛЬТРЫ ----------------------
 def passes_filters_local(item):
     price = item.get("price", 0)
 
