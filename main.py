@@ -158,16 +158,21 @@ def passes_filters_local(item: dict, user_id: int) -> bool:
             return False
     return True
 
-# ---------------------- INLINE КНОПКА ДЛЯ ЛОТА ----------------------
+# ---------------------- INLINE КНОПКА ДЛЯ ЛОТА (исправлено) ----------------------
 def make_item_inline_kb(item: dict) -> InlineKeyboardMarkup:
+    """
+    Явно строим inline_keyboard как список списков, чтобы Pydantic не жаловался.
+    Первая строка: кнопка открытия в браузере (если есть item_id).
+    Вторая строка: кнопка сброса активного URL (callback).
+    """
     item_id = item.get("item_id")
-    kb = InlineKeyboardMarkup(row_width=2)
+    rows = []
     if item_id:
         url = f"https://lzt.market/{item_id}"
-        kb.add(InlineKeyboardButton(text="Открыть в браузере", url=url))
-    # добавим кнопку для быстрого сброса активного URL (если нужно) — callback handled below
-    kb.add(InlineKeyboardButton(text="Сбросить активный URL", callback_data="reset_active_url"))
-    return kb
+        rows.append([InlineKeyboardButton(text="Открыть в браузере", url=url)])
+    # кнопка сброса активного URL
+    rows.append([InlineKeyboardButton(text="Сбросить активный URL", callback_data="reset_active_url")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ---------------------- КОМПАКТНАЯ КАРТОЧКА (с указанием источника) ----------------------
 def format_item_card_short(item: dict, source_label: str) -> str:
@@ -363,23 +368,30 @@ async def stop_hunter_cmd(message: types.Message):
         await message.answer("⚠ Охотник и так не запущен у вас.")
     await safe_delete(message)
 
-# ---------------------- ПАНЕЛЬ: список URL (inline) ----------------------
+# ---------------------- ПАНЕЛЬ: список URL (inline) (исправлено) ----------------------
 def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=1)
+    """
+    Явно строим inline_keyboard как список списков.
+    Для каждого URL добавляем две строки: выбрать и удалить (чтобы избежать проблем сериализации).
+    """
     urls = user_urls[user_id]
+    rows = []
     if not urls:
-        kb.add(InlineKeyboardButton(text="Список пуст", callback_data="noop"))
-        return kb
-    for idx, u in enumerate(urls):
-        label = u
-        if len(label) > URL_LABEL_MAX:
-            label = label[:URL_LABEL_MAX-3] + "..."
-        # кнопка выбора и удаления в одной строке (через callback)
-        kb.add(InlineKeyboardButton(text=f"Выбрать #{idx+1}: {label}", callback_data=f"useurl:{idx}"))
-        kb.add(InlineKeyboardButton(text=f"Удалить #{idx+1}", callback_data=f"delurl:{idx}"))
-    kb.add(InlineKeyboardButton(text="Отмена", callback_data="noop"))
-    return kb
+        rows.append([InlineKeyboardButton(text="Список пуст", callback_data="noop")])
+    else:
+        for idx, u in enumerate(urls):
+            label = u
+            if len(label) > URL_LABEL_MAX:
+                label = label[:URL_LABEL_MAX-3] + "..."
+            # строка выбора
+            rows.append([InlineKeyboardButton(text=f"Выбрать #{idx+1}: {label}", callback_data=f"useurl:{idx}")])
+            # строка удаления
+            rows.append([InlineKeyboardButton(text=f"Удалить #{idx+1}", callback_data=f"delurl:{idx}")])
+    # отмена
+    rows.append([InlineKeyboardButton(text="Отмена", callback_data="noop")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
+# ---------------------- ОБРАБОТКА ТЕКСТОВ И КНОПОК ----------------------
 @dp.message()
 async def buttons(message: types.Message):
     user = message.from_user
@@ -609,7 +621,6 @@ async def handle_callbacks(call: types.CallbackQuery):
             user_active_url_index[user_id] = None
             user_seen_items[user_id].clear()
             await call.answer("Активный URL сброшен.")
-            # если есть сообщение — обновим текст
             try:
                 await call.message.edit_text("✔ Активный URL сброшен. Используется базовый API.")
             except Exception:
