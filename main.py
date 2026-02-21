@@ -22,8 +22,9 @@ user_filters = defaultdict(lambda: {"min": None, "max": None, "title": None})
 user_search_active = defaultdict(lambda: False)
 user_seen_items = defaultdict(set)        # анти-дубликаты per-user
 user_hunter_tasks = {}
-user_modes = defaultdict(lambda: None)    # "min", "max", "title"
+user_modes = defaultdict(lambda: None)    # "min", "max", "title", "url"
 user_started = set()                      # пользователям, которым уже отправили стартовое сообщение
+user_urls = defaultdict(lambda: None)     # кастомный URL с сайта per-user (API-версия)
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -32,6 +33,7 @@ def main_kb():
             [KeyboardButton(text="💎 Искать все")],
             [KeyboardButton(text="💰 Мин. цена"), KeyboardButton(text="💰 Макс. цена")],
             [KeyboardButton(text="🔤 Фильтр по названию")],
+            [KeyboardButton(text="🔗 URL с сайта")],
             [KeyboardButton(text="📦 Последние 69 лотов")],
             [KeyboardButton(text="🚀 Запустить охотника")],
             [KeyboardButton(text="🛑 Стоп охотника")],
@@ -50,17 +52,17 @@ START_INFO = (
 
 COMMANDS_MENU = (
     "<b>Основные команды и описание</b>\n\n"
-    "💎 <b>Искать все</b> — сбросить все фильтры.\n"
+    "💎 <b>Искать все</b> — сбросить все фильтры бота.\n"
     "💰 <b>Мин. цена</b> — ввести минимальную цену (число).\n"
     "💰 <b>Макс. цена</b> — ввести максимальную цену (число).\n"
     "🔤 <b>Фильтр по названию</b> — ввести слово/фразу для поиска в названии.\n"
-    "📦 <b>Последние 69 лотов</b> — показать текущие лоты по фильтрам.\n"
+    "🔗 <b>URL с сайта</b> — вставить ссылку из браузера (lzt.market), бот будет парсить именно её через API.\n"
+    "📦 <b>Последние 69 лотов</b> — показать текущие лоты по фильтрам/URL.\n"
     "🚀 <b>Запустить охотника</b> — включить/выключить режим охотника только для вас.\n"
     "🛑 <b>Стоп охотника</b> или <b>/stop_hunter</b> — остановить охотника только для вас.\n"
-    "/status — показать текущие фильтры и состояние охотника.\n\n"
+    "/status — показать текущие фильтры, URL и состояние охотника.\n\n"
     "<i>Режим охотника</i> делает запросы каждые 1.7 секунды и отправляет только новые лоты.\n"
-    "Фильтры применяются отдельно для каждого пользователя — если кто-то включит охотника, "
-    "это не запустит его у других.\n"
+    "Фильтры и URL применяются отдельно для каждого пользователя.\n"
 )
 
 # ---------------------- ПАРСЕР ПЕРСОНАЖЕЙ ----------------------
@@ -86,17 +88,28 @@ def extract_characters(title: str):
     grab("Zenless Zone Zero")
     return result
 
+# ---------------------- ВЫБОР URL ДЛЯ ПОЛЬЗОВАТЕЛЯ ----------------------
+def get_user_url(user_id: int) -> str:
+    """
+    Если у пользователя задан свой URL — используем его.
+    Иначе используем базовый LZT_URL из конфига.
+    """
+    custom = user_urls[user_id]
+    if custom:
+        return custom
+    return LZT_URL
+
 # ---------------------- API LZT ----------------------
-async def fetch_items():
+async def fetch_items(url: str):
     headers = {"Authorization": f"Bearer {LZT_API_KEY}"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(LZT_URL, headers=headers, timeout=10) as resp:
+            async with session.get(url, headers=headers, timeout=10) as resp:
                 status = resp.status
                 text = await resp.text()
 
                 print("\n===== RAW API RESPONSE =====")
-                print("URL:", LZT_URL)
+                print("URL:", url)
                 print("STATUS:", status)
                 print("TEXT:", text[:500])
                 print("============================\n")
@@ -173,12 +186,18 @@ def format_item_card_short(item: dict) -> str:
 # ---------------------- ПОСЛЕДНИЕ 69 ЛОТОВ (PER-USER) ----------------------
 async def send_compact_69_for_user(user_id: int, chat_id: int):
     try:
-        items, error = await fetch_items()
+        url = get_user_url(user_id)
+        items, error = await fetch_items(url)
         if error:
             await bot.send_message(chat_id, f"❗ Ошибка API:\n{error}")
             return
 
-        await bot.send_message(chat_id, f"ℹ API вернул лотов: <b>{len(items)}</b>", parse_mode="HTML")
+        await bot.send_message(
+            chat_id,
+            f"ℹ API вернул лотов: <b>{len(items)}</b>\n"
+            f"🔗 Источник: {'кастомный URL' if user_urls[user_id] else 'базовый LZT_URL'}",
+            parse_mode="HTML"
+        )
 
         if not items:
             await bot.send_message(chat_id, "❗ API вернул пустой список.")
@@ -186,7 +205,7 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
 
         filtered = [i for i in items if passes_filters_local(i, user_id)]
         if not filtered:
-            await bot.send_message(chat_id, "❗ Лоты есть, но они не проходят фильтры.")
+            await bot.send_message(chat_id, "❗ Лоты есть, но они не проходят фильтры бота.")
             return
 
         # отправляем компактные карточки с паузой
@@ -203,10 +222,13 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
     Персональный охотник:
     - при старте помечаем текущие лоты как увиденные (чтобы не спамить)
     - отправляем только новые item_id, применяя фильтры per-user
+    - источник: либо базовый LZT_URL, либо кастомный URL с сайта
     """
+    url = get_user_url(user_id)
+
     # при старте помечаем текущие лоты как увиденные
     try:
-        items, error = await fetch_items()
+        items, error = await fetch_items(url)
         if not error and isinstance(items, list):
             for it in items:
                 iid = it.get("item_id")
@@ -217,7 +239,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
     while user_search_active[user_id]:
         try:
-            items, error = await fetch_items()
+            items, error = await fetch_items(url)
             if error:
                 await bot.send_message(chat_id, f"❗ Ошибка API (охотник):\n{error}")
                 await asyncio.sleep(HUNTER_INTERVAL)
@@ -276,12 +298,14 @@ async def status_cmd(message: types.Message):
     chat_id = message.chat.id
     f = user_filters[user_id]
     active = user_search_active[user_id]
+    url = user_urls[user_id]
     lines = [
         "<b>Текущие настройки</b>",
         f"🔸 Мин. цена: {f['min'] if f['min'] is not None else 'не задана'}",
         f"🔸 Макс. цена: {f['max'] if f['max'] is not None else 'не задана'}",
         f"🔸 Фильтр по названию: {html.escape(f['title']) if f['title'] else 'не задан'}",
         f"🔸 Режим охотника: {'ВКЛЮЧЁН' if active else 'ВЫКЛЮЧЕН'}",
+        f"🔸 Кастомный URL: {html.escape(url) if url else 'не задан (используется базовый LZT_URL)'}",
         f"🔸 Отправлено лотов (анти-дубликаты): {len(user_seen_items[user_id])}"
     ]
     await message.answer("\n".join(lines), parse_mode="HTML")
@@ -333,9 +357,43 @@ async def buttons(message: types.Message):
             user_filters[user_id]["title"] = text or None
             user_modes[user_id] = None
             if user_filters[user_id]["title"]:
-                await bot.send_message(chat_id, f"✔ Фильтр по названию: <b>{html.escape(user_filters[user_id]['title'])}</b>", parse_mode="HTML")
+                await bot.send_message(
+                    chat_id,
+                    f"✔ Фильтр по названию: <b>{html.escape(user_filters[user_id]['title'])}</b>",
+                    parse_mode="HTML"
+                )
             else:
                 await bot.send_message(chat_id, "✔ Фильтр по названию сброшен.")
+            await safe_delete(message)
+            return
+
+        if mode == "url":
+            # пользователь прислал URL с сайта
+            user_modes[user_id] = None
+            url_text = text.strip()
+
+            if not (url_text.startswith("http://") or url_text.startswith("https://")):
+                await bot.send_message(chat_id, "❌ Это не похоже на URL. Вставь ссылку вида:\nhttps://lzt.market/...")
+                await safe_delete(message)
+                return
+
+            # нормализуем: lzt.market -> api.lzt.market
+            # пример: https://lzt.market/mihoyo?pmin=1...
+            # станет:  https://api.lzt.market/mihoyo?pmin=1...
+            url_text = url_text.replace("://lzt.market", "://api.lzt.market")
+            url_text = url_text.replace("://www.lzt.market", "://api.lzt.market")
+
+            user_urls[user_id] = url_text
+            user_seen_items[user_id].clear()
+
+            await bot.send_message(
+                chat_id,
+                "✔ Кастомный URL сохранён.\n"
+                "Теперь бот будет использовать его для поиска и охотника.\n"
+                "Если хочешь вернуться к базовому API — просто очисти URL командой:\n"
+                "<code>🔗 URL с сайта</code> и отправь пустую строку или слово <b>сброс</b>.",
+                parse_mode="HTML"
+            )
             await safe_delete(message)
             return
 
@@ -345,7 +403,7 @@ async def buttons(message: types.Message):
             user_filters[user_id]["max"] = None
             user_filters[user_id]["title"] = None
             user_seen_items[user_id].clear()
-            await bot.send_message(chat_id, "🧹 Фильтры сброшены. Охотник начнёт с чистого списка.")
+            await bot.send_message(chat_id, "🧹 Фильтры бота сброшены. Охотник начнёт с чистого списка.")
 
         elif text == "💰 Мин. цена":
             user_modes[user_id] = "min"
@@ -359,31 +417,53 @@ async def buttons(message: types.Message):
             user_modes[user_id] = "title"
             await bot.send_message(chat_id, "Введи слово/фразу, которая должна быть в названии:")
 
+        elif text == "🔗 URL с сайта":
+            user_modes[user_id] = "url"
+            await bot.send_message(
+                chat_id,
+                "Вставь ссылку из браузера с lzt.market, например:\n"
+                "https://lzt.market/mihoyo?pmin=1&pmax=399&ea=no&genshin_legendary_min=3\n\n"
+                "Чтобы сбросить кастомный URL и вернуться к базовому API — отправь слово <b>сброс</b>.",
+                parse_mode="HTML"
+            )
+
+        elif text.lower() == "сброс" and mode == "url":
+            # сброс URL, если пользователь в режиме url и решил сбросить
+            user_modes[user_id] = None
+            user_urls[user_id] = None
+            user_seen_items[user_id].clear()
+            await bot.send_message(chat_id, "✔ Кастомный URL сброшен. Используется базовый LZT_URL.")
+            await safe_delete(message)
+            return
+
         elif text == "📦 Последние 69 лотов":
             await send_compact_69_for_user(user_id, chat_id)
 
         elif text == "🚀 Запустить охотника":
-            # теперь кнопка работает как toggle: если не запущен — запускаем, если запущен — останавливаем
+            # toggle: если не запущен — запускаем, если запущен — останавливаем
             if not user_search_active[user_id]:
                 # запускаем: помечаем текущие лоты как увиденные, чтобы не спамить
                 user_seen_items[user_id].clear()
                 try:
-                    items, error = asyncio.run(fetch_items_sync())
+                    url = get_user_url(user_id)
+                    items, error = await fetch_items(url)
                     if not error and isinstance(items, list):
                         for it in items:
                             iid = it.get("item_id")
                             if iid:
                                 user_seen_items[user_id].add(iid)
                 except Exception:
-                    # если не получилось синхронно, просто продолжим — охотник при старте попытается пометить
                     pass
 
                 user_search_active[user_id] = True
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
-                await bot.send_message(chat_id, f"🧨 Режим охотника запущен для вас (интервал {HUNTER_INTERVAL} сек).")
+                await bot.send_message(
+                    chat_id,
+                    f"🧨 Режим охотника запущен для вас (интервал {HUNTER_INTERVAL} сек).\n"
+                    f"Источник: {'кастомный URL' if user_urls[user_id] else 'базовый LZT_URL'}."
+                )
             else:
-                # если уже запущен — выключаем
                 user_search_active[user_id] = False
                 task = user_hunter_tasks.get(user_id)
                 if task:
@@ -414,14 +494,6 @@ async def buttons(message: types.Message):
         await bot.send_message(chat_id, f"❌ Ошибка в обработке кнопок:\n{html.escape(str(e))}")
         await safe_delete(message)
 
-# ---------------------- ВСПОМОГАТЕЛЬ: синхронный вызов fetch_items для пометки при старте ----------------------
-def fetch_items_sync():
-    """
-    Вспомогательная обёртка для вызова fetch_items в синхронном контексте.
-    Используется только для быстрой пометки при нажатии кнопки (не критично).
-    """
-    return asyncio.get_event_loop().run_until_complete(fetch_items())
-
 # ---------------------- УДАЛЕНИЕ СООБЩЕНИЯ ----------------------
 async def safe_delete(message: types.Message):
     try:
@@ -431,7 +503,7 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск персонального бота (охотник per-user, без сбора всех данных)...")
+    print("[BOT] Запуск персонального бота (персональные фильтры + кастомный URL с сайта)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
