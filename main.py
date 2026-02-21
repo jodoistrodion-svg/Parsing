@@ -16,6 +16,7 @@ dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
 HUNTER_INTERVAL = 1.7  # интервал охотника (секунды)
+MAX_MESSAGE_PART = 4000  # безопасный лимит для Telegram HTML сообщений
 
 # ---------------------- ПЕРСОНАЛЬНЫЕ СТАТЫ (PER-USER) ----------------------
 user_filters = defaultdict(lambda: {"min": None, "max": None, "title": None})
@@ -145,28 +146,91 @@ def format_field_value(value: Any) -> str:
         s = str(value)
     return html.escape(s)
 
+# ---------------------- БЕЗОПАСНАЯ ОТПРАВКА ДЛИННЫХ СООБЩЕНИЙ ----------------------
+async def send_long_message(chat_id: int, text: str, parse_mode: str = "HTML", disable_web_page_preview: bool = True):
+    """
+    Разбивает text на части <= MAX_MESSAGE_PART символов и отправляет последовательно.
+    Возвращает список message ids.
+    """
+    MAX_LEN = MAX_MESSAGE_PART
+    if len(text) <= MAX_LEN:
+        try:
+            msg = await bot.send_message(chat_id, text, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+            return [msg.message_id]
+        except Exception as e:
+            print("send_long_message error:", e)
+            try:
+                msg = await bot.send_message(chat_id, text[:MAX_LEN], parse_mode=None, disable_web_page_preview=disable_web_page_preview)
+                return [msg.message_id]
+            except Exception:
+                return []
+
+    parts = []
+    lines = text.split("\n")
+    cur = ""
+    for line in lines:
+        if len(cur) + len(line) + 1 <= MAX_LEN:
+            cur += (line + "\n")
+        else:
+            if cur:
+                parts.append(cur)
+            if len(line) > MAX_LEN:
+                start = 0
+                while start < len(line):
+                    chunk = line[start:start + MAX_LEN - 10]
+                    parts.append(chunk)
+                    start += len(chunk)
+                cur = ""
+            else:
+                cur = line + "\n"
+    if cur:
+        parts.append(cur)
+
+    sent_ids = []
+    for p in parts:
+        try:
+            msg = await bot.send_message(chat_id, p, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+            sent_ids.append(msg.message_id)
+        except Exception as e:
+            print("send_long_message part error:", e)
+            try:
+                msg = await bot.send_message(chat_id, p[:MAX_LEN], parse_mode=None, disable_web_page_preview=disable_web_page_preview)
+                sent_ids.append(msg.message_id)
+            except Exception:
+                pass
+        await asyncio.sleep(0.15)
+    return sent_ids
+
 # ---------------------- ПРЕМИУМ-КАРТОЧКА (ВСЕ ПОЛЯ ИЗ API) ----------------------
 def format_item_card_full(item: dict) -> str:
     lines = []
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎮 <b>{html.escape(title)}</b>")
-    lines.append(f"💰 <b>{html.escape(str(price))}₽</b>" if price != "—" else "💰 —")
-    # characters block
+    lines.append(f"🎮 <b>{html.escape(str(title))}</b>")
+    if price != "—":
+        lines.append(f"💰 <b>{html.escape(str(price))}₽</b>")
+    else:
+        lines.append("💰 —")
     chars = extract_characters(title)
     if chars:
         for c in chars:
             lines.append(f"✨ {html.escape(c)}")
-    # include all fields from item, sorted for stability
     for key in sorted(item.keys()):
-        # skip title and price already shown
         if key in ("title", "price"):
             continue
         value = item.get(key)
-        formatted = format_field_value(value)
-        lines.append(f"🔹 <b>{html.escape(str(key))}</b>: {formatted}")
-    # link at the end
+        try:
+            if isinstance(value, (dict, list)):
+                formatted = json.dumps(value, ensure_ascii=False)
+            else:
+                formatted = str(value)
+        except Exception:
+            formatted = str(value)
+        # Обрезаем очень длинные поля, чтобы не перегружать сообщения
+        if len(formatted) > 3000:
+            formatted = formatted[:3000] + "... (обрезано)"
+        lines.append(f"🔹 <b>{html.escape(str(key))}</b>: {html.escape(formatted)}")
     item_id = item.get("item_id")
     link = f"https://lzt.market/{item_id}" if item_id else "—"
     lines.append(f"🔗 <a href=\"{html.escape(link)}\">{html.escape(link)}</a>")
@@ -178,21 +242,26 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
     try:
         items, error = await fetch_items()
         if error:
-            await bot.send_message(chat_id, f"❗ Ошибка API:\n{error}")
+            await send_long_message(chat_id, f"❗ Ошибка API:\n{html.escape(str(error))}")
             return
-        await bot.send_message(chat_id, f"ℹ API вернул лотов: <b>{len(items)}</b>", parse_mode="HTML")
+
+        await send_long_message(chat_id, f"ℹ API вернул лотов: <b>{len(items)}</b>")
+
         if not items:
-            await bot.send_message(chat_id, "❗ API вернул пустой список.")
+            await send_long_message(chat_id, "❗ API вернул пустой список.")
             return
+
         filtered = [i for i in items if passes_filters_local(i, user_id)]
         if not filtered:
-            await bot.send_message(chat_id, "❗ Лоты есть, но они не проходят фильтры.")
+            await send_long_message(chat_id, "❗ Лоты есть, но они не проходят фильтры.")
             return
+
         for item in filtered:
             card = format_item_card_full(item)
-            await bot.send_message(chat_id, card, parse_mode="HTML", disable_web_page_preview=True)
+            await send_long_message(chat_id, card)
+            await asyncio.sleep(0.25)
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ Ошибка в send_compact_69:\n{e}")
+        await send_long_message(chat_id, f"❌ Ошибка в send_compact_69:\n{html.escape(str(e))}")
 
 # ---------------------- ОХОТНИК PER-USER ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
@@ -200,9 +269,10 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
         try:
             items, error = await fetch_items()
             if error:
-                await bot.send_message(chat_id, f"❗ Ошибка API (охотник):\n{error}")
+                await send_long_message(chat_id, f"❗ Ошибка API (охотник):\n{html.escape(str(error))}")
                 await asyncio.sleep(HUNTER_INTERVAL)
                 continue
+
             for item in items:
                 item_id = item.get("item_id")
                 if not item_id:
@@ -213,12 +283,13 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     continue
                 user_seen_items[user_id].add(item_id)
                 card = format_item_card_full(item)
-                await bot.send_message(chat_id, card, parse_mode="HTML", disable_web_page_preview=True)
+                await send_long_message(chat_id, card)
+                await asyncio.sleep(0.25)
             await asyncio.sleep(HUNTER_INTERVAL)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            await bot.send_message(chat_id, f"❌ Ошибка в режиме охотника:\n{e}")
+            await send_long_message(chat_id, f"❌ Ошибка в режиме охотника:\n{html.escape(str(e))}")
             await asyncio.sleep(HUNTER_INTERVAL)
 
 # ---------------------- /start (отправляем стартовое сообщение один раз пользователю) ----------------------
