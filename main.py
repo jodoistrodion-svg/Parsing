@@ -23,10 +23,26 @@ HUNTER_INTERVAL = 1.7
 SHORT_CARD_MAX = 900
 URL_LABEL_MAX = 40
 
+# ---------------------- ФУНКЦИЯ АВТО-ЧИСТКИ URL ----------------------
+def normalize_url(url: str) -> str:
+    url = url.strip()
+
+    # заменяем пробелы на корректные символы
+    url = url.replace(" ", "")
+    url = url.replace("pdate_to_down_upload", "pdate_to_down_upload")
+    url = url.replace("brawl_cup_min=", "brawl_cup_min=")
+    url = url.replace("clash_cup_min=", "clash_cup_min=")
+
+    # нормализация домена
+    url = url.replace("://lzt.market", "://api.lzt.market")
+    url = url.replace("://www.lzt.market", "://api.lzt.market")
+
+    return url
+
 # ---------------------- ЖЁСТКО ВШИТЫЕ URL ----------------------
 BUILTIN_URLS = [
-    "https://api.lzt.market/mihoyo?pmax=399&genshin_level_min=30&order_by=pdate_to_down_upload",
-    "https://api.lzt.market/supercell?pmax=399&brawl_cup_min=20000&clash_cup_min=8000",
+    normalize_url("https://api.lzt.market/mihoyo?pmax=399&genshin_level_min=30&order_by=pdate_to_down_upload"),
+    normalize_url("https://api.lzt.market/supercell?pmax=399&brawl_cup_min=20000&clash_cup_min=8000"),
 ]
 
 # ---------------------- ПЕР-ЮЗЕР ДАННЫЕ ----------------------
@@ -39,7 +55,7 @@ user_started = set()
 
 # пользовательские URL (добавленные)
 user_urls = defaultdict(list)
-user_active_url_index = defaultdict(lambda: None)  # только для статуса
+user_active_url_index = defaultdict(lambda: None)
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -84,8 +100,8 @@ async def fetch_items(url: str):
 
                 try:
                     data = json.loads(text)
-                except Exception as e:
-                    return [], f"❌ API вернул не JSON: {e}"
+                except Exception:
+                    return [], f"❌ API вернул не JSON:\n{text[:200]}"
 
                 items = data.get("items")
                 if not isinstance(items, list):
@@ -195,7 +211,6 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
 
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
-    # помечаем текущие как увиденные
     items_with_sources, _ = await fetch_all_sources(user_id)
     for it, _ in items_with_sources:
         iid = it.get("item_id")
@@ -280,7 +295,6 @@ def build_urls_list_kb(user_id: int):
     urls = get_all_sources(user_id)
     rows = []
 
-    # первые два — встроенные, без удаления
     for idx, url in enumerate(urls):
         label = url if len(url) < URL_LABEL_MAX else url[:URL_LABEL_MAX] + "..."
         if idx < len(BUILTIN_URLS):
@@ -300,8 +314,8 @@ async def handle_callbacks(call: types.CallbackQuery):
 
     if data.startswith("delurl:"):
         idx = int(data.split(":")[1])
-        # индекс в общем списке, но удалять можно только пользовательские
         builtin_count = len(BUILTIN_URLS)
+
         if idx >= builtin_count:
             real_idx = idx - builtin_count
             if 0 <= real_idx < len(user_urls[user_id]):
@@ -322,7 +336,6 @@ async def buttons(message: types.Message):
     text = (message.text or "").strip()
     mode = user_modes[user_id]
 
-    # режимы ввода
     if mode == "min" and text.isdigit():
         user_filters[user_id]["min"] = int(text)
         user_modes[user_id] = None
@@ -343,21 +356,11 @@ async def buttons(message: types.Message):
 
     if mode == "add_url":
         user_modes[user_id] = None
-        url = text.strip()
-
-        if not url.startswith("http"):
-            await message.answer("❌ Это не URL")
-            return await safe_delete(message)
-
-        # нормализация
-        url = url.replace("://lzt.market", "://api.lzt.market")
-        url = url.replace("://www.lzt.market", "://api.lzt.market")
-
+        url = normalize_url(text)
         user_urls[user_id].append(url)
         await message.answer(f"✔ URL добавлен: {url}")
         return await safe_delete(message)
 
-    # кнопки
     if text == "💰 Мин. цена":
         user_modes[user_id] = "min"
         return await message.answer("Введи минимальную цену:")
@@ -404,7 +407,6 @@ async def buttons(message: types.Message):
     if text == "◀️ Назад":
         return await message.answer("⭐ Главное меню:", reply_markup=main_kb())
 
-    # автоудаление
     if not text.startswith("/"):
         await asyncio.sleep(0.5)
         await safe_delete(message)
