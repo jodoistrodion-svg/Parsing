@@ -2,6 +2,7 @@ import asyncio
 import json
 import aiohttp
 import html
+import re
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
@@ -25,19 +26,39 @@ URL_LABEL_MAX = 40
 
 # ---------------------- ФУНКЦИЯ АВТО-ЧИСТКИ URL ----------------------
 def normalize_url(url: str) -> str:
-    url = url.strip()
+    if not url:
+        return url
 
-    # заменяем пробелы на корректные символы
-    url = url.replace(" ", "")
-    url = url.replace("pdate_to_down_upload", "pdate_to_down_upload")
-    url = url.replace("brawl_cup_min=", "brawl_cup_min=")
-    url = url.replace("clash_cup_min=", "clash_cup_min=")
+    s = url.strip()
+    s = s.replace(" ", "")
+    s = s.replace("\t", "")
+    s = s.replace("\n", "")
+    s = s.replace("+", "")
+    s = s.replace("!", "")
 
-    # нормализация домена
-    url = url.replace("://lzt.market", "://api.lzt.market")
-    url = url.replace("://www.lzt.market", "://api.lzt.market")
+    # любые кривые api*.market → api.lzt.market
+    s = re.sub(r"https://api.*?\.market", "https://api.lzt.market", s)
+    s = s.replace("://lzt.market", "://api.lzt.market")
+    s = s.replace("://www.lzt.market", "://api.lzt.market")
 
-    return url
+    # фиксы параметров
+    s = s.replace("genshinlevelmin", "genshin_level_min")
+    s = s.replace("genshinlevel_min", "genshin_level_min")
+    s = s.replace("genshin_levelmin", "genshin_level_min")
+
+    s = s.replace("brawl_cupmin", "brawl_cup_min")
+    s = s.replace("clash_cupmin", "clash_cup_min")
+
+    s = s.replace("orderby", "order_by")
+    s = s.replace("order_by=pdate_to_down_upoad", "order_by=pdate_to_down_upload")
+    s = s.replace("order_by=pdate_to_down_up", "order_by=pdate_to_down_upload")
+    s = s.replace("order_by=pdate_to_downupload", "order_by=pdate_to_down_upload")
+
+    if not s.startswith("https://api.lzt.market"):
+        tail = s.split(".market")[-1]
+        s = "https://api.lzt.market" + tail
+
+    return s
 
 # ---------------------- ЖЁСТКО ВШИТЫЕ URL ----------------------
 BUILTIN_URLS = [
@@ -197,7 +218,7 @@ async def send_compact_69_for_user(user_id: int, chat_id: int):
     await bot.send_message(
         chat_id,
         f"📦 Найдено уникальных лотов: <b>{len(items_list)}</b>\n"
-        f"🔍 Источники: {len(get_all_sources(user_id))} URL",
+        f"🔍 Источников: {len(get_all_sources(user_id))} URL",
         parse_mode="HTML",
     )
 
