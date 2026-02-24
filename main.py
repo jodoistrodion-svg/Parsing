@@ -20,7 +20,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
-HUNTER_INTERVAL = 1.7
+HUNTER_INTERVAL = 1.0
 SHORT_CARD_MAX = 900
 URL_LABEL_MAX = 60
 
@@ -464,3 +464,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
