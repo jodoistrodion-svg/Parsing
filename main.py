@@ -172,6 +172,10 @@ async def fetch_items(url: str):
 
 # ---------------------- ПРОВЕРКА URL ПЕРЕД ДОБАВЛЕНИЕМ ----------------------
 async def validate_url_before_add(url: str):
+    """
+    По запросу: разрешаем добавлять URL даже если API вернул пустой список items.
+    Оставляем проверку параметров и сетевых/парсинг ошибок.
+    """
     ok, err = validate_params(url)
     if not ok:
         return False, err
@@ -180,9 +184,7 @@ async def validate_url_before_add(url: str):
     if api_err:
         return False, f"❌ API ошибка: {api_err}"
 
-    if not items:
-        return False, "❌ API вернул пустой список items"
-
+    # Разрешаем добавление даже при пустом items
     return True, None
 
 # ---------------------- ИСТОЧНИКИ ----------------------
@@ -243,8 +245,7 @@ def make_card(item: dict, source_label: str) -> str:
     price = item.get("price", "—")
     item_id = item.get("item_id", "—")
 
-    # Популярные поля, которые могут приходить в JSON (варианты имён)
-    trophies = item.get("trophies") or item.get("cups") or item.get("brawl_cup") or item.get("brawl_cup_min") or None
+    trophies = item.get("trophies") or item.get("cups") or item.get("brawl_cup") or None
     level = item.get("level") or item.get("lvl") or item.get("user_level") or None
     townhall = item.get("townhall") or item.get("ratsha") or item.get("th") or None
     builder_village = item.get("builder_level") or item.get("bb_level") or None
