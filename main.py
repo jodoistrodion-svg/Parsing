@@ -213,6 +213,30 @@ def passes_filters(item: dict, user_id: int) -> bool:
     return True
 
 # ---------------------- ВСПОМОГАТЕЛИ ДЛЯ ОТОБРАЖЕНИЯ ----------------------
+def format_seller(seller):
+    if not seller:
+        return None
+    if isinstance(seller, str):
+        return seller
+    if isinstance(seller, dict):
+        parts = []
+        username = seller.get("username") or seller.get("user") or seller.get("name")
+        if username:
+            parts.append(f"👤 {username}")
+        sold = seller.get("sold_items_count")
+        if sold is not None:
+            parts.append(f"📦 Продано: {sold}")
+        active = seller.get("active_items_count")
+        if active is not None:
+            parts.append(f"🔸 Активных: {active}")
+        restore = seller.get("restore_percents")
+        if restore is not None:
+            parts.append(f"🛠 Восстановление: {restore}%")
+        if not parts:
+            return str(seller)
+        return " | ".join(parts)
+    return str(seller)
+
 def make_card(item: dict, source_label: str) -> str:
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
@@ -225,10 +249,10 @@ def make_card(item: dict, source_label: str) -> str:
     builder_village = item.get("builder_level") or item.get("bb_level") or None
     guarantee = item.get("guarantee") or item.get("warranty") or item.get("guarantee_text") or None
     phone_bound = item.get("phone_bound") or item.get("phone") or item.get("phone_bound_flag")
-    seller = item.get("seller") or item.get("user") or item.get("owner") or None
+    seller_raw = item.get("seller") or item.get("user") or item.get("owner") or None
+    seller = format_seller(seller_raw)
     created = item.get("created_at") or item.get("date") or item.get("added_at") or None
     extra_flags = []
-    # Detect discount or special labels
     if item.get("discount") or item.get("sale") or item.get("discount_percent"):
         extra_flags.append("Скидка")
     if item.get("phone_bound") or item.get("phone"):
@@ -251,11 +275,15 @@ def make_card(item: dict, source_label: str) -> str:
     if builder_village:
         lines.append(f"🔧 Деревня строителя: {html.escape(str(builder_village))}")
     if seller:
-        lines.append(f"👤 Продавец: {html.escape(str(seller))}")
+        lines.append(seller)
     if created:
         lines.append(f"📅 Добавлено: {html.escape(str(created))}")
     if extra_flags:
         lines.append("🔖 " + ", ".join(extra_flags))
+    if guarantee:
+        lines.append(f"🛡 {html.escape(str(guarantee))}")
+    if phone_bound is not None:
+        lines.append(f"📱 Телефон привязан: {'Да' if phone_bound else 'Нет'}")
 
     lines.append(f"💰 {html.escape(str(price))}₽" if price != "—" else "💰 —")
     lines.append(f"🆔 {html.escape(str(item_id))}")
@@ -317,11 +345,17 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         await bot.send_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.")
         return
 
-    # Отправляем сырые данные первого элемента (усечённо) для понимания полей
+    # Показываем краткий список ключей первого элемента (без сырых словарей)
     try:
-        raw = json.dumps(items[0], ensure_ascii=False, indent=2)
-        raw_short = raw[:1500]
-        await bot.send_message(chat_id, f"<pre>{html.escape(raw_short)}</pre>", parse_mode="HTML")
+        keys = list(items[0].keys())
+        await bot.send_message(chat_id, f"🔍 Пример полей в первом лоте: {', '.join(keys)}")
+    except Exception:
+        pass
+
+    # Сохраняем полный JSON первого элемента в файл для отладки (не отправляем в чат)
+    try:
+        with open("last_item_debug.json", "w", encoding="utf-8") as f:
+            json.dump(items[0], f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
