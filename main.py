@@ -24,23 +24,73 @@ HUNTER_INTERVAL = 1.0
 SHORT_CARD_MAX = 900
 URL_LABEL_MAX = 60
 
+# ---------------------- АВТОПРОВЕРКА ПАРАМЕТРОВ ----------------------
+VALID_PARAMS = {
+    "mihoyo": {
+        "pmin", "pmax", "order_by",
+        "genshin_level_min", "genshin_legendary_min",
+        "honkai_level_min", "honkai_legendary_min",
+        "zenless_level_min"
+    },
+    "supercell": {
+        "pmin", "pmax", "order_by",
+        "brawl_cup_min", "clash_cup_min",
+        "legendary_brawlers_min"
+    },
+    "riot": {
+        "pmin", "pmax", "order_by",
+        "valorant_rank_type1", "valorant_knife_min",
+        "daybreak", "knife"
+    },
+    "hytale": {
+        "pmin", "pmax", "order_by"
+    }
+}
+
+def detect_section(url: str):
+    for section in VALID_PARAMS.keys():
+        if f"/{section}" in url:
+            return section
+    return None
+
+def extract_params(url: str):
+    if "?" not in url:
+        return {}
+    query = url.split("?", 1)[1]
+    params = {}
+    for part in query.split("&"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            params[k] = v
+    return params
+
+def validate_params(url: str):
+    section = detect_section(url)
+    if not section:
+        return False, "❌ Не удалось определить раздел (mihoyo/supercell/riot/hytale)"
+
+    params = extract_params(url)
+    valid = VALID_PARAMS[section]
+
+    for p in params.keys():
+        if p not in valid:
+            return False, f"❌ Параметр '{p}' не существует в разделе '{section}'"
+
+    return True, None
+
 # ---------------------- НОРМАЛИЗАЦИЯ URL ----------------------
 def normalize_url(url: str) -> str:
     if not url:
         return url
     s = url.strip()
-    s = s.replace(" ", "")
-    s = s.replace("\t", "")
-    s = s.replace("\n", "")
-    s = s.replace("+", "")
-    s = s.replace("!", "")
+    s = s.replace(" ", "").replace("\t", "").replace("\n", "").replace("+", "").replace("!", "")
 
-    # Приводим домен к корректному api.lzt.market если встречаются искажения
+    # Исправление домена
     s = re.sub(r"https?://api.*?\.market", "https://api.lzt.market", s)
     s = s.replace("://lzt.market", "://api.lzt.market")
     s = s.replace("://www.lzt.market", "://api.lzt.market")
 
-    # Частые опечатки в параметрах
+    # Исправление параметров
     s = s.replace("genshinlevelmin", "genshin_level_min")
     s = s.replace("genshinlevel_min", "genshin_level_min")
     s = s.replace("genshin_levelmin", "genshin_level_min")
@@ -51,7 +101,6 @@ def normalize_url(url: str) -> str:
     s = s.replace("order_by=pdate_to_down_up", "order_by=pdate_to_down_upload")
     s = s.replace("order_by=pdate_to_downupload", "order_by=pdate_to_down_upload")
 
-    # Если домен всё ещё не корректен — попытка восстановить хвост
     if ".market" in s and not s.startswith("https://api.lzt.market"):
         tail = s.split(".market")[-1]
         s = "https://api.lzt.market" + tail
@@ -59,15 +108,12 @@ def normalize_url(url: str) -> str:
     return s
 
 # ---------------------- ПЕР-ЮЗЕР ДАННЫЕ ----------------------
-# Убраны фильтры по цене — оставлен только фильтр по названию
 user_filters = defaultdict(lambda: {"title": None})
 user_search_active = defaultdict(lambda: False)
 user_seen_items = defaultdict(set)
 user_hunter_tasks = {}
-user_modes = defaultdict(lambda: None)  # "title", "add_url"
+user_modes = defaultdict(lambda: None)
 user_started = set()
-
-# пользовательские URL (можно добавлять несколько)
 user_urls = defaultdict(list)
 
 # ---------------------- КЛАВИАТУРА ----------------------
@@ -86,8 +132,7 @@ def main_kb():
 
 # ---------------------- ТЕКСТЫ ----------------------
 START_INFO = (
-    "🤖 Парсинг‑бот создан при поддержке этой прекрасной дамы — просьба подписаться неравнодушных:\n"
-    "https://t.me/+wHlSL7Ij2rpjYmFi\n\n"
+    "🤖 Парсинг‑бот\n"
     "Создатель бота (вопросы, реклама, поддержка):\n"
     "https://t.me/StaliNusshhAaaaaa\n\n"
 )
@@ -124,9 +169,23 @@ async def fetch_items(url: str):
     except Exception as e:
         return [], f"❌ Ошибка: {e}"
 
+# ---------------------- ПРОВЕРКА URL ПЕРЕД ДОБАВЛЕНИЕМ ----------------------
+async def validate_url_before_add(url: str):
+    ok, err = validate_params(url)
+    if not ok:
+        return False, err
+
+    items, api_err = await fetch_items(url)
+    if api_err:
+        return False, f"❌ API ошибка: {api_err}"
+
+    if not items:
+        return False, "❌ API вернул пустой список items"
+
+    return True, None
+
 # ---------------------- ИСТОЧНИКИ ----------------------
 def get_all_sources(user_id: int):
-    # Только пользовательские URL — встроенные убраны по требованию
     return user_urls[user_id]
 
 # ---------------------- ПАРСИНГ ВСЕХ ИСТОЧНИКОВ ----------------------
@@ -158,14 +217,50 @@ def make_card(item: dict, source_label: str) -> str:
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
     item_id = item.get("item_id", "—")
+
+    # Популярные поля, которые могут приходить в JSON (варианты имён)
+    trophies = item.get("trophies") or item.get("cups") or item.get("brawl_cup") or item.get("brawl_cup_min") or None
+    level = item.get("level") or item.get("lvl") or item.get("user_level") or None
+    townhall = item.get("townhall") or item.get("ratsha") or item.get("th") or None
+    builder_village = item.get("builder_level") or item.get("bb_level") or None
+    guarantee = item.get("guarantee") or item.get("warranty") or item.get("guarantee_text") or None
+    phone_bound = item.get("phone_bound") or item.get("phone") or item.get("phone_bound_flag")
+    seller = item.get("seller") or item.get("user") or item.get("owner") or None
+    created = item.get("created_at") or item.get("date") or item.get("added_at") or None
+    extra_flags = []
+    # Detect discount or special labels
+    if item.get("discount") or item.get("sale") or item.get("discount_percent"):
+        extra_flags.append("Скидка")
+    if item.get("phone_bound") or item.get("phone"):
+        extra_flags.append("Телефон привязан")
+    if item.get("guarantee") or item.get("warranty"):
+        extra_flags.append("Гарантия")
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━",
         f"🔎 <b>{source_label}</b>",
         f"🎮 <b>{html.escape(str(title))}</b>",
-        f"💰 {html.escape(str(price))}₽" if price != "—" else "💰 —",
-        f"🆔 {html.escape(str(item_id))}",
-        "━━━━━━━━━━━━━━━━━━━━",
     ]
+
+    if level:
+        lines.append(f"🔼 Уровень: {html.escape(str(level))}")
+    if trophies:
+        lines.append(f"🏆 Кубков: {html.escape(str(trophies))}")
+    if townhall:
+        lines.append(f"🏰 Ратуша: {html.escape(str(townhall))}")
+    if builder_village:
+        lines.append(f"🔧 Деревня строителя: {html.escape(str(builder_village))}")
+    if seller:
+        lines.append(f"👤 Продавец: {html.escape(str(seller))}")
+    if created:
+        lines.append(f"📅 Добавлено: {html.escape(str(created))}")
+    if extra_flags:
+        lines.append("🔖 " + ", ".join(extra_flags))
+
+    lines.append(f"💰 {html.escape(str(price))}₽" if price != "—" else "💰 —")
+    lines.append(f"🆔 {html.escape(str(item_id))}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
     card = "\n".join(lines)
     if len(card) > SHORT_CARD_MAX:
         return card[:SHORT_CARD_MAX - 100] + "\n... (обрезано)"
@@ -221,6 +316,15 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
     if not items:
         await bot.send_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.")
         return
+
+    # Отправляем сырые данные первого элемента (усечённо) для понимания полей
+    try:
+        raw = json.dumps(items[0], ensure_ascii=False, indent=2)
+        raw_short = raw[:1500]
+        await bot.send_message(chat_id, f"<pre>{html.escape(raw_short)}</pre>", parse_mode="HTML")
+    except Exception:
+        pass
+
     aggregated = {}
     for item in items:
         iid = item.get("item_id")
@@ -247,7 +351,6 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
 
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
-    # помечаем текущие как увиденные
     try:
         items_with_sources, _ = await fetch_all_sources(user_id)
         for it, _ in items_with_sources:
@@ -327,7 +430,6 @@ def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
     rows = []
     for idx, url in enumerate(urls):
         label = url if len(url) <= URL_LABEL_MAX else url[:URL_LABEL_MAX-3] + "..."
-        # Показываем строку с меткой, затем кнопки: Проверка и Удалить
         rows.append([InlineKeyboardButton(text=f"URL #{idx+1}: {label}", callback_data="noop")])
         rows.append([
             InlineKeyboardButton(text=f"Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
@@ -347,8 +449,6 @@ async def handle_callbacks(call: types.CallbackQuery):
         urls = get_all_sources(user_id)
         if 0 <= idx < len(urls):
             removed = urls.pop(idx)
-            # If using user_urls[user_id] directly, ensure removal from that list
-            # get_all_sources returns user_urls[user_id], so this modifies it
             await call.message.edit_text(f"✔ Удалён: {removed}")
             await call.answer("Удалено")
             return
@@ -394,15 +494,21 @@ async def buttons_handler(message: types.Message):
 
         if mode == "add_url":
             user_modes[user_id] = None
-            url = normalize_url(text)
+            raw = text
+            url = normalize_url(raw)
             if not url.startswith("http"):
                 await message.answer("❌ Это не похоже на URL.")
                 return await safe_delete(message)
+
+            ok, err = await validate_url_before_add(url)
+            if not ok:
+                await message.answer(err)
+                return await safe_delete(message)
+
             user_urls[user_id].append(url)
-            await message.answer(f"✔ URL добавлен: {url}")
+            await message.answer(f"✔ URL добавлен и прошёл проверку: {url}")
             return await safe_delete(message)
 
-        # кнопки
         if text == "🔤 Фильтр по названию":
             user_modes[user_id] = "title"
             return await message.answer("Введи слово/фразу для фильтра:")
@@ -441,7 +547,6 @@ async def buttons_handler(message: types.Message):
         if text == "◀️ Назад":
             return await message.answer("⭐ Главное меню:", reply_markup=main_kb())
 
-        # авто-удаление пользовательских сообщений (не команд)
         if text and not text.startswith("/"):
             await asyncio.sleep(0.5)
             await safe_delete(message)
@@ -459,9 +564,8 @@ async def safe_delete(message: types.Message):
 
 # ---------------------- RUN ----------------------
 async def main():
-    print("[BOT] Запуск бота: только пользовательские URL, проверка 10 лотов, тест URL из списка...")
+    print("[BOT] Запуск бота: только пользовательские URL, проверка 10 лотов, тест URL из списка, автопроверка URL...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
