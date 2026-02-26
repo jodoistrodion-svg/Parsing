@@ -7,6 +7,7 @@ import re
 import time
 import random
 import os
+from urllib.parse import urlsplit
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
@@ -629,44 +630,109 @@ async def try_autobuy_item(source: dict, item: dict):
         "Accept": "application/json",
         "Content-Type": "application/json",
     } if LZT_API_KEY else {}
-    payload = {}
+    base_payload = {}
     if item.get("price") is not None:
-        payload["price"] = item.get("price")
+        base_payload["price"] = item.get("price")
 
     if LZT_SECRET_WORD:
         # Разные версии API принимают разные ключи для секретного слова.
-        payload.update({
+        base_payload.update({
             "secret_answer": LZT_SECRET_WORD,
             "secret_word": LZT_SECRET_WORD,
             "qa_answer": LZT_SECRET_WORD,
             "answer": LZT_SECRET_WORD,
         })
 
-    source_url = (source.get("url") or "").lower()
-    base_hosts = ["https://api.lzt.market", "https://api.lolz.live"]
-    if "api.lolz.live" in source_url:
-        base_hosts = ["https://api.lolz.live", "https://api.lzt.market"]
+    payload_variants = [
+        base_payload,
+        {**base_payload, "confirm": 1, "is_confirmed": True},
+        {k: v for k, v in base_payload.items() if k != "price"},
+    ]
+
+    source_url = (source.get("url") or "").strip()
+    source_base = ""
+    try:
+        parts = urlsplit(source_url)
+        if parts.scheme and parts.netloc:
+            source_base = f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        source_base = ""
+
+    base_hosts = []
+    if source_base:
+        base_hosts.append(source_base)
+    base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
+    if "api.lolz.live" in source_url.lower():
+        base_hosts = ["https://api.lolz.live", *base_hosts]
+
+    dedup_bases = []
+    seen_bases = set()
+    for base in base_hosts:
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        dedup_bases.append(base)
 
     buy_urls = []
-    for base in base_hosts:
+    for base in dedup_bases:
         buy_urls.extend([
             f"{base}/{item_id}/buy",
+            f"{base}/{item_id}/fast-buy",
             f"{base}/market/{item_id}/buy",
+            f"{base}/market/{item_id}/fast-buy",
             f"{base}/items/{item_id}/buy",
+            f"{base}/items/{item_id}/fast-buy",
         ])
+
+    success_markers = (
+        "success",
+        "ok",
+        "purchased",
+        "already bought",
+        "уже куп",
+    )
+
+    terminal_error_markers = (
+        "insufficient",
+        "not enough",
+        "недостаточно",
+        "уже продан",
+        "already sold",
+        "не найден",
+        "not found",
+    )
+
     last_err = "unknown"
     try:
         session = await get_session()
         for buy_url in buy_urls:
-            async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
-                text = await resp.text()
-                if resp.status in (200, 201):
-                    return True, f"{buy_url} -> {text[:220]}"
-                if resp.status in (400, 401, 403, 409, 422):
-                    if "secret" in text.lower() or "answer" in text.lower():
-                        return False, f"{buy_url} -> HTTP {resp.status}: нужен/неверный ответ на секретный вопрос ({text[:220]})"
-                    return False, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
-                last_err = f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+            for payload in payload_variants:
+                async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
+                    text = await resp.text()
+                    text_lower = text.lower()
+                    if resp.status in (200, 201):
+                        return True, f"{buy_url} -> {text[:220]}"
+                    if any(marker in text_lower for marker in success_markers):
+                        return True, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+                    if "secret" in text_lower or "answer" in text_lower or "секрет" in text_lower:
+                        last_err = f"{buy_url} -> HTTP {resp.status}: нужен/неверный ответ на секретный вопрос ({text[:220]})"
+                        continue
+                    if any(marker in text_lower for marker in terminal_error_markers):
+                        return False, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+
+                    # На некоторых версиях API срабатывает только form-urlencoded.
+                    form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+                    async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
+                        form_text = await form_resp.text()
+                        form_text_lower = form_text.lower()
+                        if form_resp.status in (200, 201) or any(marker in form_text_lower for marker in success_markers):
+                            return True, f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
+                        if "secret" in form_text_lower or "answer" in form_text_lower or "секрет" in form_text_lower:
+                            last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: нужен/неверный ответ на секретный вопрос ({form_text[:220]})"
+                            continue
+                        if any(marker in form_text_lower for marker in terminal_error_markers):
+                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
+                        last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
         return False, last_err
     except Exception as e:
         return False, str(e)
