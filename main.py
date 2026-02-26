@@ -150,58 +150,16 @@ async def db_set_last_report(user_id: int, ts: int):
         await db.execute("UPDATE users SET last_error_report=? WHERE user_id=?", (ts, user_id))
         await db.commit()
 
-# ---------------------- АВТОПРОВЕРКА ПАРАМЕТРОВ ----------------------
-VALID_PARAMS = {
-    "mihoyo": {
-        "pmin", "pmax", "order_by",
-        "genshin_level_min", "genshin_legendary_min",
-        "honkai_level_min", "honkai_legendary_min",
-        "zenless_level_min"
-    },
-    "supercell": {
-        "pmin", "pmax", "order_by",
-        "brawl_cup_min", "clash_cup_min",
-        "legendary_brawlers_min"
-    },
-    "riot": {
-        "pmin", "pmax", "order_by",
-        "valorant_rank_type1", "valorant_knife_min",
-        "daybreak", "knife"
-    },
-    "hytale": {
-        "pmin", "pmax", "order_by"
-    }
-}
-
-def detect_section(url: str):
-    for section in VALID_PARAMS.keys():
-        if f"/{section}" in url:
-            return section
-    return None
-
-def extract_params(url: str):
-    if "?" not in url:
-        return {}
-    query = url.split("?", 1)[1]
-    params = {}
-    for part in query.split("&"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            params[k] = v
-    return params
-
-def validate_params(url: str):
-    section = detect_section(url)
-    if not section:
-        return False, "❌ Не удалось определить раздел (mihoyo/supercell/riot/hytale)"
-
-    params = extract_params(url)
-    valid = VALID_PARAMS[section]
-
-    for p in params.keys():
-        if p not in valid:
-            return False, f"❌ Параметр '{p}' не существует в разделе '{section}'"
-
+# ---------------------- ВАЛИДАЦИЯ URL ----------------------
+def validate_market_url(url: str):
+    """
+    Разрешаем любые фильтры/параметры из API LZT.
+    Проверяем только базовую корректность API-ссылки.
+    """
+    if not url.startswith(("http://", "https://")):
+        return False, "❌ Это не похоже на URL."
+    if not ("api.lzt.market/" in url or "api.lolz.live/" in url):
+        return False, "❌ Нужна ссылка на API LZT (api.lzt.market или api.lolz.live)."
     return True, None
 
 # ---------------------- НОРМАЛИЗАЦИЯ URL ----------------------
@@ -209,9 +167,10 @@ def normalize_url(url: str) -> str:
     if not url:
         return url
     s = url.strip()
-    s = s.replace(" ", "").replace("\t", "").replace("\n", "").replace("+", "").replace("!", "")
+    s = s.replace(" ", "").replace("\t", "").replace("\n", "")
 
     s = re.sub(r"https?://api.*?\.market", "https://api.lzt.market", s)
+    s = re.sub(r"https?://api\.lolz\.guru", "https://api.lzt.market", s)
     s = s.replace("://lzt.market", "://api.lzt.market")
     s = s.replace("://www.lzt.market", "://api.lzt.market")
 
@@ -220,6 +179,9 @@ def normalize_url(url: str) -> str:
     s = s.replace("genshin_levelmin", "genshin_level_min")
     s = s.replace("brawl_cupmin", "brawl_cup_min")
     s = s.replace("clash_cupmin", "clash_cup_min")
+    s = s.replace("clashcupmin", "clash_cup_min")
+    s = s.replace("clashcupmax", "clash_cup_max")
+    s = s.replace("clash_cupmax", "clash_cup_max")
     s = s.replace("orderby", "order_by")
     s = s.replace("order_by=pdate_to_down_upoad", "order_by=pdate_to_down_upload")
     s = s.replace("order_by=pdate_to_down_up", "order_by=pdate_to_down_upload")
@@ -367,7 +329,7 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
 
 # ---------------------- ПРОВЕРКА URL ПЕРЕД ДОБАВЛЕНИЕМ ----------------------
 async def validate_url_before_add(url: str):
-    ok, err = validate_params(url)
+    ok, err = validate_market_url(url)
     if not ok:
         return False, err
 
