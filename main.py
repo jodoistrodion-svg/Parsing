@@ -42,7 +42,12 @@ DB_FILE = "bot_data.sqlite"
 WEBAPP_HOST = "0.0.0.0"
 WEBAPP_PORT = 8080
 MINI_APP_TITLE = "Parsing Bot · Mini App"
-WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").rstrip("/")
+WEBAPP_PUBLIC_URL = (
+    os.getenv("WEBAPP_PUBLIC_URL")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    or ""
+).rstrip("/")
 
 # ---------------------- АИО-SQLITE (асинхронная БД) ----------------------
 async def init_db():
@@ -266,9 +271,18 @@ async def user_hunter_interval(user_id: int):
 def format_balance(amount: float) -> str:
     return f"{amount:,.2f} ₽".replace(",", " ")
 
-def mini_app_url(user_id: int) -> str:
-    base_url = WEBAPP_PUBLIC_URL or f"http://localhost:{WEBAPP_PORT}"
+def mini_app_url(user_id: int) -> str | None:
+    if not WEBAPP_PUBLIC_URL:
+        return None
+    base_url = WEBAPP_PUBLIC_URL
+    if not base_url.startswith("http"):
+        base_url = f"https://{base_url}"
     return f"{base_url}/mini-app?user_id={user_id}"
+
+
+def mini_app_ready() -> bool:
+    url = mini_app_url(1)
+    return bool(url and url.startswith("https://"))
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -599,19 +613,37 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         await asyncio.sleep(0.2)
 
 async def try_autobuy_item(source: dict, item: dict):
-    item_id = item.get("item_id")
+    item_id = item.get("item_id") or item.get("id")
     if not item_id:
         return False, "missing_item_id"
+
+    try:
+        item_id = int(item_id)
+    except (TypeError, ValueError):
+        return False, f"invalid_item_id={item_id}"
+
     headers = {"Authorization": f"Bearer {LZT_API_KEY}"} if LZT_API_KEY else {}
-    buy_url = f"https://api.lzt.market/{item_id}/buy"
-    payload = {"price": item.get("price")}
+    payload = {}
+    if item.get("price") is not None:
+        payload["price"] = item.get("price")
+
+    buy_urls = [
+        f"https://api.lzt.market/{item_id}/buy",
+        f"https://api.lzt.market/market/{item_id}/buy",
+        f"https://api.lzt.market/items/{item_id}/buy",
+    ]
+    last_err = "unknown"
     try:
         session = await get_session()
-        async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
-            text = await resp.text()
-            if resp.status in (200, 201):
-                return True, text[:300]
-            return False, f"HTTP {resp.status}: {text[:300]}"
+        for buy_url in buy_urls:
+            async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
+                text = await resp.text()
+                if resp.status in (200, 201):
+                    return True, f"{buy_url} -> {text[:220]}"
+                if resp.status in (400, 401, 403, 409, 422):
+                    return False, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+                last_err = f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+        return False, last_err
     except Exception as e:
         return False, str(e)
 
@@ -623,6 +655,13 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
         for it, _source in items_with_sources:
             iid = it.get("item_id")
             key = f"id::{iid}" if iid else f"noid::{it.get('title')}_{it.get('price')}"
+            if _source.get("autobuy", False):
+                bought, buy_info = await try_autobuy_item(_source, it)
+                if bought:
+                    await bot.send_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
+                else:
+                    await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена (при запуске): {_source['label']} | item_id={it.get('item_id')} | {html.escape(str(buy_info))}")
+
             user_seen_items[user_id].add(key)
             await db_mark_seen(user_id, key)
     except Exception:
@@ -712,15 +751,23 @@ async def start_cmd(message: types.Message):
     balance = await db_get_balance(user_id)
     await message.answer(COMMANDS_MENU, parse_mode="HTML", reply_markup=main_kb())
     await message.answer(f"💎 Ваш баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=mini_app_url(user_id)))],
+    access_rows = []
+    app_link = mini_app_url(user_id)
+    if app_link:
+        access_rows.append([InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=app_link))])
+    access_rows.extend([
         [InlineKeyboardButton(text="🔐 Ввести пароль (админ)", callback_data="enter_pass")],
         [InlineKeyboardButton(text="👤 У меня нет пароля", callback_data="no_pass")]
     ])
+    kb = InlineKeyboardMarkup(inline_keyboard=access_rows)
+    access_hint = ""
+    if not app_link:
+        access_hint = "\n\n⚠ Mini App недоступен: задайте WEBAPP_PUBLIC_URL (https://...)."
     await message.answer(
         "<b>Доступ</b>\n"
         "Введите пароль для прав администратора\n"
-        "или выберите режим ограниченного доступа.",
+        "или выберите режим ограниченного доступа."
+        + access_hint,
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -973,15 +1020,24 @@ async def buttons_handler(message: types.Message):
 
         if text == "💎 Баланс":
             balance = await db_get_balance(user_id)
-            kb = InlineKeyboardMarkup(inline_keyboard=[
+            rows = [
                 [InlineKeyboardButton(text="➕ Пополнить 100 ₽", callback_data="topup:100")],
                 [InlineKeyboardButton(text="➕ Пополнить 500 ₽", callback_data="topup:500")],
-                [InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=mini_app_url(user_id)))]
-            ])
-            return await message.answer(f"💎 Текущий баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML", reply_markup=kb)
+            ]
+            app_link = mini_app_url(user_id)
+            if app_link:
+                rows.append([InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=app_link))])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+            text_msg = f"💎 Текущий баланс: <b>{format_balance(balance)}</b>"
+            if not app_link:
+                text_msg += "\n⚠ Mini App недоступен без WEBAPP_PUBLIC_URL (https://...)."
+            return await message.answer(text_msg, parse_mode="HTML", reply_markup=kb)
 
         if text == "🪄 Mini App":
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=mini_app_url(user_id)))]] )
+            app_link = mini_app_url(user_id)
+            if not app_link:
+                return await message.answer("⚠ Mini App пока недоступен. Укажите WEBAPP_PUBLIC_URL (https://...) и перезапустите бота.")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=app_link))]] )
             return await message.answer("🪄 Откройте мини-приложение кнопкой ниже", reply_markup=kb)
 
         if text == "🏠 Главное меню":
