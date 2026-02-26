@@ -7,9 +7,3 @@ LZT_URL = "https://api.lzt.market/mihoyo?per_page=69&order_by=date_to_down"
 
 # Интервал проверки новых лотов (в секундах)
 CHECK_INTERVAL = 5
-
-
-
-
-
-
