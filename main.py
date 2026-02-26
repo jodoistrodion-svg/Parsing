@@ -45,9 +45,17 @@ async def init_db():
             user_id INTEGER,
             url TEXT,
             added_at INTEGER,
+            enabled INTEGER DEFAULT 1,
+            autobuy INTEGER DEFAULT 0,
             PRIMARY KEY(user_id, url)
         )
         """)
+        cur = await db.execute("PRAGMA table_info(urls)")
+        cols = [row[1] for row in await cur.fetchall()]
+        if "enabled" not in cols:
+            await db.execute("ALTER TABLE urls ADD COLUMN enabled INTEGER DEFAULT 1")
+        if "autobuy" not in cols:
+            await db.execute("ALTER TABLE urls ADD COLUMN autobuy INTEGER DEFAULT 0")
         await db.execute("""
         CREATE TABLE IF NOT EXISTS seen (
             user_id INTEGER,
@@ -68,7 +76,7 @@ async def init_db():
 async def db_add_url(user_id: int, url: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO urls(user_id, url, added_at) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO urls(user_id, url, added_at, enabled, autobuy) VALUES (?, ?, ?, 1, 0)",
             (user_id, url, int(time.time()))
         )
         await db.commit()
@@ -80,9 +88,19 @@ async def db_remove_url(user_id: int, url: str):
 
 async def db_get_urls(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
-        cur = await db.execute("SELECT url FROM urls WHERE user_id=? ORDER BY added_at", (user_id,))
+        cur = await db.execute("SELECT url, enabled, autobuy FROM urls WHERE user_id=? ORDER BY added_at", (user_id,))
         rows = await cur.fetchall()
-        return [r[0] for r in rows]
+        return [{"url": r[0], "enabled": bool(r[1]), "autobuy": bool(r[2])} for r in rows]
+
+async def db_set_url_enabled(user_id: int, url: str, enabled: bool):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE urls SET enabled=? WHERE user_id=? AND url=?", (1 if enabled else 0, user_id, url))
+        await db.commit()
+
+async def db_set_url_autobuy(user_id: int, url: str, autobuy: bool):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE urls SET autobuy=? WHERE user_id=? AND url=?", (1 if autobuy else 0, user_id, url))
+        await db.commit()
 
 async def db_mark_seen(user_id: int, key: str):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -220,7 +238,7 @@ user_seen_items = defaultdict(set)  # loaded from DB
 user_hunter_tasks = {}
 user_modes = defaultdict(lambda: None)  # modes: None, "enter_admin_password", "title", "add_url"
 user_started = set()
-user_urls = defaultdict(list)  # loaded from DB
+user_urls = defaultdict(list)  # loaded from DB: [{"url": str, "enabled": bool, "autobuy": bool}]
 user_api_errors = defaultdict(int)
 
 # load persisted data for user on first interaction (async)
@@ -361,27 +379,47 @@ async def validate_url_before_add(url: str):
     return True, None
 
 # ---------------------- ИСТОЧНИКИ ----------------------
-async def get_all_sources(user_id: int):
+async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
     # Защита от случайных дубликатов в памяти, если URL уже есть в БД.
-    deduped = list(dict.fromkeys(user_urls[user_id]))
+    deduped = []
+    seen = set()
+    for source in user_urls[user_id]:
+        url = source.get("url")
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(source)
     if deduped != user_urls[user_id]:
         user_urls[user_id] = deduped
+    if enabled_only:
+        return [s for s in user_urls[user_id] if s.get("enabled", True)]
     return user_urls[user_id]
+
+async def get_autobuy_sources(user_id: int):
+    sources = await get_all_sources(user_id, enabled_only=True)
+    return [s for s in sources if s.get("autobuy", False)]
 
 # ---------------------- ПАРСИНГ ВСЕХ ИСТОЧНИКОВ ----------------------
 async def fetch_all_sources(user_id: int):
-    urls = await get_all_sources(user_id)
+    sources = await get_all_sources(user_id, enabled_only=True)
     results = []
     errors = []
-    for idx, url in enumerate(urls):
-        label = f"URL #{idx+1}"
+    for idx, source in enumerate(sources):
+        url = source["url"]
+        source_info = {
+            "idx": idx + 1,
+            "url": url,
+            "enabled": source.get("enabled", True),
+            "autobuy": source.get("autobuy", False),
+            "label": f"URL #{idx+1}",
+        }
         items, err = await fetch_with_retry(url)
         if err:
             errors.append((url, err))
             continue
         for it in items:
-            results.append((it, label))
+            results.append((it, source_info))
     return results, errors
 
 # ---------------------- ФИЛЬТРЫ ----------------------
@@ -504,13 +542,13 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
     limited = items_list[:10]
     await bot.send_message(
         chat_id,
-        f"✅ Проверка работоспособности\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>\n🔍 Источников: {len(await get_all_sources(user_id))} URL",
+        f"✅ Проверка работоспособности\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>\n🔍 Активных источников: {len(await get_all_sources(user_id, enabled_only=True))} URL",
         parse_mode="HTML"
     )
     for item, source in limited:
         if not passes_filters(item, user_id):
             continue
-        card = make_card(item, source)
+        card = make_card(item, source["label"])
         kb = make_kb(item)
         try:
             await bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
@@ -564,12 +602,29 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
             await bot.send_message(chat_id, card)
         await asyncio.sleep(0.2)
 
+async def try_autobuy_item(source: dict, item: dict):
+    item_id = item.get("item_id")
+    if not item_id:
+        return False, "missing_item_id"
+    headers = {"Authorization": f"Bearer {LZT_API_KEY}"} if LZT_API_KEY else {}
+    buy_url = f"https://api.lzt.market/{item_id}/buy"
+    payload = {"price": item.get("price")}
+    try:
+        session = await get_session()
+        async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
+            text = await resp.text()
+            if resp.status in (200, 201):
+                return True, text[:300]
+            return False, f"HTTP {resp.status}: {text[:300]}"
+    except Exception as e:
+        return False, str(e)
+
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     try:
         items_with_sources, _ = await fetch_all_sources(user_id)
-        for it, _ in items_with_sources:
+        for it, _source in items_with_sources:
             iid = it.get("item_id")
             key = f"id::{iid}" if iid else f"noid::{it.get('title')}_{it.get('price')}"
             user_seen_items[user_id].add(key)
@@ -600,7 +655,15 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     continue
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
-                card = make_card(item, source)
+
+                if source.get("autobuy", False):
+                    bought, buy_info = await try_autobuy_item(source, item)
+                    if bought:
+                        await bot.send_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
+                    else:
+                        await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена: {source['label']} | item_id={item.get('item_id')} | {html.escape(str(buy_info))}")
+
+                card = make_card(item, source["label"])
                 kb = make_kb(item)
                 try:
                     await bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
@@ -691,12 +754,51 @@ async def handle_callbacks(call: types.CallbackQuery):
         except (TypeError, ValueError):
             await call.answer("Некорректный индекс URL", show_alert=True)
             return
-        urls = await get_all_sources(user_id)
-        if 0 <= idx < len(urls):
-            removed = urls.pop(idx)
-            await db_remove_url(user_id, removed)
-            await call.message.edit_text(f"✔ Удалён: {removed}")
+        sources = await get_all_sources(user_id)
+        if 0 <= idx < len(sources):
+            removed = sources.pop(idx)
+            await db_remove_url(user_id, removed["url"])
+            await call.message.edit_text(f"✔ Удалён: {removed['url']}")
             await call.answer("Удалено")
+            return
+        await call.answer("Некорректный индекс URL", show_alert=True)
+        return
+
+
+    if data.startswith("togurl:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректный индекс URL", show_alert=True)
+            return
+        sources = await get_all_sources(user_id)
+        if 0 <= idx < len(sources):
+            source = sources[idx]
+            new_enabled = not source.get("enabled", True)
+            source["enabled"] = new_enabled
+            await db_set_url_enabled(user_id, source["url"], new_enabled)
+            kb = build_urls_list_kb_sync(sources)
+            await call.message.edit_reply_markup(reply_markup=kb)
+            await call.answer("URL включён" if new_enabled else "URL выключен")
+            return
+        await call.answer("Некорректный индекс URL", show_alert=True)
+        return
+
+    if data.startswith("autobuyurl:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректный индекс URL", show_alert=True)
+            return
+        sources = await get_all_sources(user_id)
+        if 0 <= idx < len(sources):
+            source = sources[idx]
+            new_autobuy = not source.get("autobuy", False)
+            source["autobuy"] = new_autobuy
+            await db_set_url_autobuy(user_id, source["url"], new_autobuy)
+            kb = build_urls_list_kb_sync(sources)
+            await call.message.edit_reply_markup(reply_markup=kb)
+            await call.answer("Автопокупка включена" if new_autobuy else "Автопокупка выключена")
             return
         await call.answer("Некорректный индекс URL", show_alert=True)
         return
@@ -707,10 +809,12 @@ async def handle_callbacks(call: types.CallbackQuery):
         except (TypeError, ValueError):
             await call.answer("Некорректный индекс URL", show_alert=True)
             return
-        urls = await get_all_sources(user_id)
-        if 0 <= idx < len(urls):
-            url = urls[idx]
-            label = f"URL #{idx+1}"
+        sources = await get_all_sources(user_id)
+        if 0 <= idx < len(sources):
+            source = sources[idx]
+            url = source["url"]
+            status = "ВКЛ" if source.get("enabled", True) else "ВЫКЛ"
+            label = f"URL #{idx+1} ({status})"
             await call.answer("Проверяю URL...")
             await send_test_for_single_url(user_id, call.message.chat.id, url, label)
             return
@@ -739,20 +843,29 @@ async def status_cmd(message: types.Message):
         f"🔸 Роль: {role}",
         f"🔸 Фильтр по названию: {f['title'] if f['title'] else 'не задан'}",
         f"🔸 Охотник: {'ВКЛ' if active else 'ВЫКЛ'}",
-        f"🔸 Всего источников: {len(await get_all_sources(user_id))}",
+        f"🔸 Источников всего: {len(await get_all_sources(user_id))}",
+        f"🔸 Источников активных: {len(await get_all_sources(user_id, enabled_only=True))}",
+        f"🔸 Источников с автобаем: {len(await get_autobuy_sources(user_id))}",
         f"🔸 Увидено лотов: {len(user_seen_items[user_id])}",
         f"🔸 Ошибок API (за текущий период): {user_api_errors.get(user_id, 0)}",
     ]
     await message.answer("\n".join(lines), parse_mode="HTML")
     await safe_delete(message)
 
-def build_urls_list_kb_sync(urls: list) -> InlineKeyboardMarkup:
+def build_urls_list_kb_sync(sources: list) -> InlineKeyboardMarkup:
     rows = []
-    for idx, url in enumerate(urls):
+    for idx, source in enumerate(sources):
+        url = source["url"]
+        enabled = source.get("enabled", True)
         label = url if len(url) <= URL_LABEL_MAX else url[:URL_LABEL_MAX-3] + "..."
-        rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1}: {label}", callback_data="noop")])
+        autobuy = source.get("autobuy", False)
+        state = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+        buy_state = "🛒 АВТОБАЙ ВКЛ" if autobuy else "🛒 АВТОБАЙ ВЫКЛ"
+        rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1} ({state}, {buy_state}): {label}", callback_data="noop")])
         rows.append([
             InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
+            InlineKeyboardButton(text=f"🔁 {'Выключить' if enabled else 'Включить'}", callback_data=f"togurl:{idx}"),
+            InlineKeyboardButton(text=f"🛒 {'Выключить автобай' if autobuy else 'Включить автобай'}", callback_data=f"autobuyurl:{idx}"),
             InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}")
         ])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
@@ -795,7 +908,7 @@ async def buttons_handler(message: types.Message):
                 return await safe_delete(message)
 
             limit = await user_url_limit(user_id)
-            if len(user_urls[user_id]) >= limit:
+            if len(await get_all_sources(user_id)) >= limit:
                 await message.answer(f"❌ Достигнут лимит URL для вашей роли: {limit}")
                 return await safe_delete(message)
 
@@ -804,11 +917,11 @@ async def buttons_handler(message: types.Message):
                 await message.answer(err)
                 return await safe_delete(message)
 
-            if url in user_urls[user_id]:
+            if any(source["url"] == url for source in await get_all_sources(user_id)):
                 await message.answer("⚠ Такой URL уже добавлен.")
                 return await safe_delete(message)
 
-            user_urls[user_id].append(url)
+            user_urls[user_id].append({"url": url, "enabled": True, "autobuy": False})
             await db_add_url(user_id, url)
             await message.answer(f"✔ URL добавлен и прошёл проверку: {url}")
             return await safe_delete(message)
@@ -870,7 +983,9 @@ async def short_status_for_user(user_id: int, chat_id: int):
     active = user_search_active[user_id]
     seen = len(user_seen_items[user_id])
     total = len(await get_all_sources(user_id))
-    await bot.send_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {total} | Увидено: {seen} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+    enabled = len(await get_all_sources(user_id, enabled_only=True))
+    autobuy = len(await get_autobuy_sources(user_id))
+    await bot.send_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Ошибок API: {user_api_errors.get(user_id, 0)}")
 
 # ---------------------- RUN ----------------------
 async def main():
