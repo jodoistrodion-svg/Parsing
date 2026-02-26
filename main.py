@@ -263,27 +263,32 @@ def main_kb():
             [KeyboardButton(text="🔗 Добавить URL"), KeyboardButton(text="📚 Список URL")],
             [KeyboardButton(text="🚀 Запустить охотника"), KeyboardButton(text="🛑 Стоп охотника")],
             [KeyboardButton(text="ℹ️ Краткий статус")],
-            [KeyboardButton(text="◀️ Назад")],
+            [KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
     )
 
 # ---------------------- ТЕКСТЫ ----------------------
 START_INFO = (
-    "🤖 Парсинг‑бот создан при поддержке этой прекрасной дамы — просьба подписаться неравнодушных:\n"
-    "https://t.me/+wHlSL7Ij2rpjYmFi\n\n"
-    "Создатель бота (вопросы, реклама, поддержка):\n"
-    "https://t.me/StaliNusshhAaaaaa\n\n"
+    "<b>🤖 Добро пожаловать в Parsing Bot</b>\n"
+    "Отслеживание новых лотов по вашим URL в один клик.\n\n"
+    "<b>🔗 Полезные ссылки</b>\n"
+    "• Канал поддержки: https://t.me/+wHlSL7Ij2rpjYmFi\n"
+    "• Создатель: https://t.me/StaliNusshhAaaaaa\n"
 )
 
 COMMANDS_MENU = (
-    "<b>Команды и кнопки</b>\n\n"
-    "✅ Проверка работоспособности — парсинг до 10 лотов по всем добавленным URL.\n"
-    "🔗 Добавить URL — добавить свой URL.\n"
-    "📚 Список URL — посмотреть/удалить/проверить добавленные.\n"
-    "🚀 Запустить охотника — мониторинг всех URL.\n"
-    "🛑 Стоп охотника — остановить.\n"
-    "ℹ️ Краткий статус — показать состояние.\n"
+    "<b>🧭 Меню команд</b>\n\n"
+    "<b>✅ Проверка работоспособности</b>\n"
+    "Проверяет до 10 лотов по каждому добавленному URL.\n\n"
+    "<b>🔗 Добавить URL</b>\n"
+    "Добавляет новый источник для мониторинга.\n\n"
+    "<b>📚 Список URL</b>\n"
+    "Показывает ваши URL, позволяет проверить или удалить любой из них.\n\n"
+    "<b>🚀 Запустить охотника / 🛑 Стоп охотника</b>\n"
+    "Включает или останавливает фоновый мониторинг.\n\n"
+    "<b>ℹ️ Краткий статус</b>\n"
+    "Показывает текущую активность, число источников и ошибки API."
 )
 
 # ---------------------- HTTP / API с экспоненциальным retry ----------------------
@@ -640,13 +645,19 @@ async def error_reporter_loop():
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     await load_user_data(user_id)
-    await message.answer(START_INFO)
+    await message.answer(START_INFO, parse_mode="HTML")
     await message.answer(COMMANDS_MENU, parse_mode="HTML", reply_markup=main_kb())
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ввести пароль (админ)", callback_data="enter_pass")],
-        [InlineKeyboardButton(text="У меня нет пароля", callback_data="no_pass")]
+        [InlineKeyboardButton(text="🔐 Ввести пароль (админ)", callback_data="enter_pass")],
+        [InlineKeyboardButton(text="👤 У меня нет пароля", callback_data="no_pass")]
     ])
-    await message.answer("Введите пароль для прав администратора (верный пароль: 1303) или выберите 'У меня нет пороля'.", reply_markup=kb)
+    await message.answer(
+        "<b>Доступ</b>\n"
+        "Введите пароль для прав администратора\n"
+        "или выберите режим ограниченного доступа.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
     await safe_delete(message)
 
 @dp.callback_query()
@@ -657,13 +668,16 @@ async def handle_callbacks(call: types.CallbackQuery):
 
     if data == "enter_pass":
         user_modes[user_id] = "enter_admin_password"
-        await call.message.answer("Введи пароль администратора (только цифры):")
+        await call.message.answer("🔐 Введите пароль администратора (только цифры):")
         await call.answer()
         return
 
     if data == "no_pass":
         await set_user_role(user_id, "limited")
-        await call.message.answer("Вы выбрали режим без пароля: применены ограничения (задержка +3с, максимум 3 URL).")
+        await call.message.answer(
+            "👤 Выбран режим без пароля.\n"
+            "Ограничения: задержка +3с и максимум 3 URL."
+        )
         await call.answer("Режим ограниченного доступа активирован")
         return
 
@@ -724,12 +738,12 @@ def build_urls_list_kb_sync(urls: list) -> InlineKeyboardMarkup:
     rows = []
     for idx, url in enumerate(urls):
         label = url if len(url) <= URL_LABEL_MAX else url[:URL_LABEL_MAX-3] + "..."
-        rows.append([InlineKeyboardButton(text=f"URL #{idx+1}: {label}", callback_data="noop")])
+        rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1}: {label}", callback_data="noop")])
         rows.append([
-            InlineKeyboardButton(text=f"Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
-            InlineKeyboardButton(text=f"Удалить #{idx+1}", callback_data=f"delurl:{idx}")
+            InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
+            InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}")
         ])
-    rows.append([InlineKeyboardButton(text="Закрыть", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
@@ -751,7 +765,7 @@ async def buttons_handler(message: types.Message):
                 await set_user_role(user_id, "admin")
                 await message.answer("✔ Пароль верный. Роль администратора активирована.")
             else:
-                await message.answer("❌ Неверный пароль. Если у вас нет пароля, нажмите 'У меня нет пороля' в стартовом сообщении.")
+                await message.answer("❌ Неверный пароль. Если пароля нет — нажмите '👤 У меня нет пароля' в стартовом сообщении.")
             return await safe_delete(message)
 
         if mode == "title":
@@ -793,7 +807,7 @@ async def buttons_handler(message: types.Message):
 
         if text == "📚 Список URL":
             kb = await build_urls_list_kb(user_id)
-            return await message.answer("📚 Источники (пользовательские):", reply_markup=kb)
+            return await message.answer("📚 <b>Ваши источники</b>", parse_mode="HTML", reply_markup=kb)
 
         if text == "✅ Проверка работоспособности":
             return await send_compact_10_for_user(user_id, chat_id)
@@ -818,8 +832,8 @@ async def buttons_handler(message: types.Message):
         if text == "ℹ️ Краткий статус":
             return await short_status_for_user(user_id, chat_id)
 
-        if text == "◀️ Назад":
-            return await message.answer("⭐ Главное меню:", reply_markup=main_kb())
+        if text == "🏠 Главное меню":
+            return await message.answer("⭐ <b>Главное меню</b>", parse_mode="HTML", reply_markup=main_kb())
 
         if text and not text.startswith("/"):
             await asyncio.sleep(0.5)
