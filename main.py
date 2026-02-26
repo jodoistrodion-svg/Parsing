@@ -41,6 +41,7 @@ LIMITED_EXTRA_DELAY = 3.0  # seconds added for limited users
 DB_FILE = "bot_data.sqlite"
 WEBAPP_HOST = "0.0.0.0"
 WEBAPP_PORT = 8080
+LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
 MINI_APP_TITLE = "Parsing Bot · Mini App"
 WEBAPP_PUBLIC_URL = (
     os.getenv("WEBAPP_PUBLIC_URL")
@@ -290,9 +291,10 @@ def main_kb():
         keyboard=[
             [KeyboardButton(text="✨ Проверка лотов"), KeyboardButton(text="📚 Мои URL")],
             [KeyboardButton(text="➕ Добавить URL"), KeyboardButton(text="🔤 Фильтр")],
-            [KeyboardButton(text="🚀 Старт охотника"), KeyboardButton(text="🛑 Стоп охотника")],
-            [KeyboardButton(text="💎 Баланс"), KeyboardButton(text="🪄 Mini App")],
-            [KeyboardButton(text="📊 Краткий статус"), KeyboardButton(text="🏠 Главное меню")],
+            [KeyboardButton(text="🧹 Очистить фильтры"), KeyboardButton(text="🚀 Старт охотника")],
+            [KeyboardButton(text="🛑 Стоп охотника"), KeyboardButton(text="💎 Баланс")],
+            [KeyboardButton(text="🪄 Mini App"), KeyboardButton(text="📊 Краткий статус")],
+            [KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
     )
@@ -622,16 +624,36 @@ async def try_autobuy_item(source: dict, item: dict):
     except (TypeError, ValueError):
         return False, f"invalid_item_id={item_id}"
 
-    headers = {"Authorization": f"Bearer {LZT_API_KEY}"} if LZT_API_KEY else {}
+    headers = {
+        "Authorization": f"Bearer {LZT_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    } if LZT_API_KEY else {}
     payload = {}
     if item.get("price") is not None:
         payload["price"] = item.get("price")
 
-    buy_urls = [
-        f"https://api.lzt.market/{item_id}/buy",
-        f"https://api.lzt.market/market/{item_id}/buy",
-        f"https://api.lzt.market/items/{item_id}/buy",
-    ]
+    if LZT_SECRET_WORD:
+        # Разные версии API принимают разные ключи для секретного слова.
+        payload.update({
+            "secret_answer": LZT_SECRET_WORD,
+            "secret_word": LZT_SECRET_WORD,
+            "qa_answer": LZT_SECRET_WORD,
+            "answer": LZT_SECRET_WORD,
+        })
+
+    source_url = (source.get("url") or "").lower()
+    base_hosts = ["https://api.lzt.market", "https://api.lolz.live"]
+    if "api.lolz.live" in source_url:
+        base_hosts = ["https://api.lolz.live", "https://api.lzt.market"]
+
+    buy_urls = []
+    for base in base_hosts:
+        buy_urls.extend([
+            f"{base}/{item_id}/buy",
+            f"{base}/market/{item_id}/buy",
+            f"{base}/items/{item_id}/buy",
+        ])
     last_err = "unknown"
     try:
         session = await get_session()
@@ -641,6 +663,8 @@ async def try_autobuy_item(source: dict, item: dict):
                 if resp.status in (200, 201):
                     return True, f"{buy_url} -> {text[:220]}"
                 if resp.status in (400, 401, 403, 409, 422):
+                    if "secret" in text.lower() or "answer" in text.lower():
+                        return False, f"{buy_url} -> HTTP {resp.status}: нужен/неверный ответ на секретный вопрос ({text[:220]})"
                     return False, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
                 last_err = f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
         return False, last_err
@@ -986,6 +1010,11 @@ async def buttons_handler(message: types.Message):
         if text == "🔤 Фильтр":
             user_modes[user_id] = "title"
             return await message.answer("Введи слово/фразу для фильтра:")
+
+        if text == "🧹 Очистить фильтры":
+            user_filters[user_id]["title"] = None
+            user_modes[user_id] = None
+            return await message.answer("🧹 Фильтры очищены.")
 
         if text == "➕ Добавить URL":
             user_modes[user_id] = "add_url"
