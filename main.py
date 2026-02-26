@@ -6,6 +6,7 @@ import html
 import re
 import time
 import random
+import os
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
@@ -15,7 +16,9 @@ from aiogram.types import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    WebAppInfo,
 )
+from aiohttp import web
 
 from config import API_TOKEN, LZT_API_KEY
 
@@ -36,6 +39,10 @@ RETRY_BASE_DELAY = 1.0  # seconds
 ADMIN_PASSWORD = "1303"
 LIMITED_EXTRA_DELAY = 3.0  # seconds added for limited users
 DB_FILE = "bot_data.sqlite"
+WEBAPP_HOST = "0.0.0.0"
+WEBAPP_PORT = 8080
+MINI_APP_TITLE = "Parsing Bot · Mini App"
+WEBAPP_PUBLIC_URL = os.getenv("WEBAPP_PUBLIC_URL", "").rstrip("/")
 
 # ---------------------- АИО-SQLITE (асинхронная БД) ----------------------
 async def init_db():
@@ -68,9 +75,14 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             role TEXT DEFAULT 'unknown',
-            last_error_report INTEGER DEFAULT 0
+            last_error_report INTEGER DEFAULT 0,
+            balance REAL DEFAULT 0
         )
         """)
+        cur = await db.execute("PRAGMA table_info(users)")
+        user_cols = [row[1] for row in await cur.fetchall()]
+        if "balance" not in user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN balance REAL DEFAULT 0")
         await db.commit()
 
 async def db_add_url(user_id: int, url: str):
@@ -119,8 +131,8 @@ async def db_load_seen(user_id: int):
 async def db_ensure_user(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO users(user_id, role, last_error_report) VALUES (?, ?, ?)",
-            (user_id, "unknown", 0)
+            "INSERT OR IGNORE INTO users(user_id, role, last_error_report, balance) VALUES (?, ?, ?, ?)",
+            (user_id, "unknown", 0, 0)
         )
         await db.commit()
 
@@ -133,8 +145,8 @@ async def db_get_role(user_id: int):
 async def db_set_role(user_id: int, role: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO users(user_id, role, last_error_report) VALUES (?, ?, ?)",
-            (user_id, role, 0)
+            "INSERT OR IGNORE INTO users(user_id, role, last_error_report, balance) VALUES (?, ?, ?, ?)",
+            (user_id, role, 0, 0)
         )
         await db.execute("UPDATE users SET role=? WHERE user_id=?", (role, user_id))
         await db.commit()
@@ -149,6 +161,22 @@ async def db_set_last_report(user_id: int, ts: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET last_error_report=? WHERE user_id=?", (ts, user_id))
         await db.commit()
+
+
+async def db_get_balance(user_id: int) -> float:
+    async with aiosqlite.connect(DB_FILE) as db:
+        cur = await db.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+
+async def db_change_balance(user_id: int, amount: float) -> float:
+    await db_ensure_user(user_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE user_id=?", (amount, user_id))
+        cur = await db.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        await db.commit()
+        return float(row[0]) if row and row[0] is not None else 0.0
 
 # ---------------------- ВАЛИДАЦИЯ URL ----------------------
 def validate_market_url(url: str):
@@ -204,8 +232,8 @@ user_urls = defaultdict(list)  # loaded from DB: [{"url": str, "enabled": bool, 
 user_api_errors = defaultdict(int)
 
 # load persisted data for user on first interaction (async)
-async def load_user_data(user_id: int):
-    if user_id in user_started:
+async def load_user_data(user_id: int, force: bool = False):
+    if user_id in user_started and not force:
         return
     await db_ensure_user(user_id)
     user_urls[user_id] = await db_get_urls(user_id)
@@ -234,41 +262,47 @@ async def user_hunter_interval(user_id: int):
     extra = LIMITED_EXTRA_DELAY if role == "limited" else 0.0
     return HUNTER_INTERVAL_BASE + extra
 
+
+def format_balance(amount: float) -> str:
+    return f"{amount:,.2f} ₽".replace(",", " ")
+
+def mini_app_url(user_id: int) -> str:
+    base_url = WEBAPP_PUBLIC_URL or f"http://localhost:{WEBAPP_PORT}"
+    return f"{base_url}/mini-app?user_id={user_id}"
+
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✅ Проверка работоспособности")],
-            [KeyboardButton(text="🔤 Фильтр по названию")],
-            [KeyboardButton(text="🔗 Добавить URL"), KeyboardButton(text="📚 Список URL")],
-            [KeyboardButton(text="🚀 Запустить охотника"), KeyboardButton(text="🛑 Стоп охотника")],
-            [KeyboardButton(text="ℹ️ Краткий статус")],
-            [KeyboardButton(text="🏠 Главное меню")],
+            [KeyboardButton(text="✨ Проверка лотов"), KeyboardButton(text="📚 Мои URL")],
+            [KeyboardButton(text="➕ Добавить URL"), KeyboardButton(text="🔤 Фильтр")],
+            [KeyboardButton(text="🚀 Старт охотника"), KeyboardButton(text="🛑 Стоп охотника")],
+            [KeyboardButton(text="💎 Баланс"), KeyboardButton(text="🪄 Mini App")],
+            [KeyboardButton(text="📊 Краткий статус"), KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
     )
 
 # ---------------------- ТЕКСТЫ ----------------------
 START_INFO = (
-    "<b>🤖 Добро пожаловать в Parsing Bot</b>\n"
-    "Отслеживание новых лотов по вашим URL в один клик.\n\n"
-    "<b>🔗 Полезные ссылки</b>\n"
-    "• Канал поддержки: https://t.me/+wHlSL7Ij2rpjYmFi\n"
-    "• Создатель: https://t.me/StaliNusshhAaaaaa\n"
+    "<b>✨ Parsing Bot 2.0</b>\n"
+    "Умный мониторинг лотов + красивый Mini App внутри Telegram.\n\n"
+    "<b>Что нового:</b>\n"
+    "• стабильное хранение URL\n"
+    "• внутренний баланс\n"
+    "• быстрый доступ к mini app"
 )
 
 COMMANDS_MENU = (
     "<b>🧭 Меню команд</b>\n\n"
-    "<b>✅ Проверка работоспособности</b>\n"
-    "Проверяет до 10 лотов по каждому добавленному URL.\n\n"
-    "<b>🔗 Добавить URL</b>\n"
-    "Добавляет новый источник для мониторинга.\n\n"
-    "<b>📚 Список URL</b>\n"
-    "Показывает ваши URL, позволяет проверить или удалить любой из них.\n\n"
-    "<b>🚀 Запустить охотника / 🛑 Стоп охотника</b>\n"
+    "<b>✨ Проверка лотов</b>\n"
+    "Проверяет до 10 лотов по всем активным URL.\n\n"
+    "<b>➕ Добавить URL / 📚 Мои URL</b>\n"
+    "Управление источниками мониторинга.\n\n"
+    "<b>🚀 Старт охотника / 🛑 Стоп охотника</b>\n"
     "Включает или останавливает фоновый мониторинг.\n\n"
-    "<b>ℹ️ Краткий статус</b>\n"
-    "Показывает текущую активность, число источников и ошибки API."
+    "<b>💎 Баланс / 🪄 Mini App</b>\n"
+    "Пополнение внутреннего баланса и удобный интерфейс mini app."
 )
 
 # ---------------------- HTTP / API с экспоненциальным retry ----------------------
@@ -673,10 +707,13 @@ async def error_reporter_loop():
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
-    await load_user_data(user_id)
+    await load_user_data(user_id, force=True)
     await message.answer(START_INFO, parse_mode="HTML")
+    balance = await db_get_balance(user_id)
     await message.answer(COMMANDS_MENU, parse_mode="HTML", reply_markup=main_kb())
+    await message.answer(f"💎 Ваш баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML")
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=mini_app_url(user_id)))],
         [InlineKeyboardButton(text="🔐 Ввести пароль (админ)", callback_data="enter_pass")],
         [InlineKeyboardButton(text="👤 У меня нет пароля", callback_data="no_pass")]
     ])
@@ -708,6 +745,17 @@ async def handle_callbacks(call: types.CallbackQuery):
             "Ограничения: задержка +3с и максимум 3 URL."
         )
         await call.answer("Режим ограниченного доступа активирован")
+        return
+
+    if data.startswith("topup:"):
+        try:
+            amount = float(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректная сумма", show_alert=True)
+            return
+        balance = await db_change_balance(user_id, amount)
+        await call.message.answer(f"✅ Баланс пополнен на {format_balance(amount)}\n💎 Текущий баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML")
+        await call.answer("Баланс пополнен")
         return
 
     if data.startswith("delurl:"):
@@ -888,22 +936,22 @@ async def buttons_handler(message: types.Message):
             await message.answer(f"✔ URL добавлен и прошёл проверку: {url}")
             return await safe_delete(message)
 
-        if text == "🔤 Фильтр по названию":
+        if text == "🔤 Фильтр":
             user_modes[user_id] = "title"
             return await message.answer("Введи слово/фразу для фильтра:")
 
-        if text == "🔗 Добавить URL":
+        if text == "➕ Добавить URL":
             user_modes[user_id] = "add_url"
             return await message.answer("Вставь URL (например https://api.lzt.market/...) :")
 
-        if text == "📚 Список URL":
+        if text == "📚 Мои URL":
             kb = await build_urls_list_kb(user_id)
             return await message.answer("📚 <b>Ваши источники</b>", parse_mode="HTML", reply_markup=kb)
 
-        if text == "✅ Проверка работоспособности":
+        if text == "✨ Проверка лотов":
             return await send_compact_10_for_user(user_id, chat_id)
 
-        if text == "🚀 Запустить охотника":
+        if text == "🚀 Старт охотника":
             if not user_search_active[user_id]:
                 user_search_active[user_id] = True
                 user_seen_items[user_id] = await db_load_seen(user_id)
@@ -920,8 +968,21 @@ async def buttons_handler(message: types.Message):
                 task.cancel()
             return await message.answer("🛑 Охотник остановлен")
 
-        if text == "ℹ️ Краткий статус":
+        if text == "📊 Краткий статус":
             return await short_status_for_user(user_id, chat_id)
+
+        if text == "💎 Баланс":
+            balance = await db_get_balance(user_id)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Пополнить 100 ₽", callback_data="topup:100")],
+                [InlineKeyboardButton(text="➕ Пополнить 500 ₽", callback_data="topup:500")],
+                [InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=mini_app_url(user_id)))]
+            ])
+            return await message.answer(f"💎 Текущий баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML", reply_markup=kb)
+
+        if text == "🪄 Mini App":
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=mini_app_url(user_id)))]] )
+            return await message.answer("🪄 Откройте мини-приложение кнопкой ниже", reply_markup=kb)
 
         if text == "🏠 Главное меню":
             return await message.answer("⭐ <b>Главное меню</b>", parse_mode="HTML", reply_markup=main_kb())
@@ -947,13 +1008,87 @@ async def short_status_for_user(user_id: int, chat_id: int):
     total = len(await get_all_sources(user_id))
     enabled = len(await get_all_sources(user_id, enabled_only=True))
     autobuy = len(await get_autobuy_sources(user_id))
-    await bot.send_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+    balance = await db_get_balance(user_id)
+    await bot.send_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+
+
+
+def render_mini_app_html(user_id: int, balance: float) -> str:
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{MINI_APP_TITLE}</title>
+  <style>
+    body {{ margin:0; font-family: Inter, Arial, sans-serif; background: linear-gradient(135deg,#0f172a,#1e293b); color:#e2e8f0; }}
+    .card {{ max-width:420px; margin:24px auto; background:rgba(30,41,59,.85); border:1px solid #334155; border-radius:18px; padding:20px; box-shadow:0 20px 40px rgba(0,0,0,.35); }}
+    .balance {{ font-size:32px; font-weight:700; margin:8px 0 16px; }}
+    .btns {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    button {{ border:none; border-radius:12px; padding:12px; font-weight:600; color:#fff; background:linear-gradient(135deg,#22c55e,#16a34a); }}
+    .muted {{ color:#94a3b8; font-size:13px; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="muted">Пользователь #{user_id}</div>
+    <h2>💎 Внутренний баланс</h2>
+    <div class="balance" id="balance">{format_balance(balance)}</div>
+    <div class="btns">
+      <button onclick="topUp(100)">+100 ₽</button>
+      <button onclick="topUp(500)">+500 ₽</button>
+      <button onclick="topUp(1000)">+1000 ₽</button>
+      <button onclick="topUp(2500)">+2500 ₽</button>
+    </div>
+    <p class="muted">Демо-режим: пополнение виртуального баланса без платежного шлюза.</p>
+  </div>
+<script>
+async function topUp(amount) {{
+  const res = await fetch('/mini-app/topup', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{user_id:{user_id}, amount}})}});
+  const data = await res.json();
+  document.getElementById('balance').textContent = data.balance;
+}}
+</script>
+</body>
+</html>
+"""
+
+async def mini_app_page(request: web.Request):
+    try:
+        user_id = int(request.query.get("user_id", "0"))
+    except ValueError:
+        return web.Response(text="bad user_id", status=400)
+    if user_id <= 0:
+        return web.Response(text="user_id required", status=400)
+    await db_ensure_user(user_id)
+    balance = await db_get_balance(user_id)
+    return web.Response(text=render_mini_app_html(user_id, balance), content_type="text/html")
+
+async def mini_app_topup(request: web.Request):
+    data = await request.json()
+    user_id = int(data.get("user_id", 0))
+    amount = float(data.get("amount", 0))
+    if user_id <= 0 or amount <= 0:
+        return web.json_response({"error": "invalid payload"}, status=400)
+    balance = await db_change_balance(user_id, amount)
+    return web.json_response({"ok": True, "balance": format_balance(balance)})
+
+async def start_mini_app_server():
+    app = web.Application()
+    app.router.add_get('/mini-app', mini_app_page)
+    app.router.add_post('/mini-app/topup', mini_app_topup)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBAPP_HOST, WEBAPP_PORT)
+    await site.start()
+    return runner
 
 # ---------------------- RUN ----------------------
 async def main():
     print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
     await init_db()
     # start background reporter
+    web_runner = await start_mini_app_server()
     try:
         asyncio.create_task(error_reporter_loop())
     except Exception:
@@ -962,6 +1097,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await close_session()
+        await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
