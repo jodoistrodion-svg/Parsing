@@ -225,7 +225,7 @@ user_api_errors = defaultdict(int)
 
 # load persisted data for user on first interaction (async)
 async def load_user_data(user_id: int):
-    if user_id in user_urls and user_urls[user_id]:
+    if user_id in user_started:
         return
     await db_ensure_user(user_id)
     user_urls[user_id] = await db_get_urls(user_id)
@@ -363,6 +363,10 @@ async def validate_url_before_add(url: str):
 # ---------------------- ИСТОЧНИКИ ----------------------
 async def get_all_sources(user_id: int):
     await load_user_data(user_id)
+    # Защита от случайных дубликатов в памяти, если URL уже есть в БД.
+    deduped = list(dict.fromkeys(user_urls[user_id]))
+    if deduped != user_urls[user_id]:
+        user_urls[user_id] = deduped
     return user_urls[user_id]
 
 # ---------------------- ПАРСИНГ ВСЕХ ИСТОЧНИКОВ ----------------------
@@ -682,7 +686,11 @@ async def handle_callbacks(call: types.CallbackQuery):
         return
 
     if data.startswith("delurl:"):
-        idx = int(data.split(":", 1)[1])
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректный индекс URL", show_alert=True)
+            return
         urls = await get_all_sources(user_id)
         if 0 <= idx < len(urls):
             removed = urls.pop(idx)
@@ -694,7 +702,11 @@ async def handle_callbacks(call: types.CallbackQuery):
         return
 
     if data.startswith("testurl:"):
-        idx = int(data.split(":", 1)[1])
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректный индекс URL", show_alert=True)
+            return
         urls = await get_all_sources(user_id)
         if 0 <= idx < len(urls):
             url = urls[idx]
@@ -790,6 +802,10 @@ async def buttons_handler(message: types.Message):
             ok, err = await validate_url_before_add(url)
             if not ok:
                 await message.answer(err)
+                return await safe_delete(message)
+
+            if url in user_urls[user_id]:
+                await message.answer("⚠ Такой URL уже добавлен.")
                 return await safe_delete(message)
 
             user_urls[user_id].append(url)
