@@ -1298,6 +1298,11 @@ async def main():
     global bot
     print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
 
+    if bot is None:
+        if not has_valid_telegram_token(API_TOKEN):
+            raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
+        bot = Bot(token=API_TOKEN)
+
     await init_db()
     # start background reporter
     web_runner = await start_mini_app_server()
@@ -1309,7 +1314,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await close_session()
-        if bot is not None:
+        if bot is not None and getattr(bot, "session", None) is not None and not bot.session.closed:
             await bot.session.close()
         await web_runner.cleanup()
 
