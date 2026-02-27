@@ -785,6 +785,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if bought:
                     await send_bot_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
                 else:
+                    await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась (при запуске): {_source['label']} | {buy_info}")
 
 
             user_seen_items[user_id].add(key)
@@ -821,6 +822,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     if bought:
                         await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
                     else:
+                        await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
 
 
                 card = make_card(item, source["label"])
