@@ -785,7 +785,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if bought:
                     await send_bot_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
                 else:
-                    await send_bot_message(chat_id, f"⚠️ Автопокупка не выполнена (при запуске): {_source['label']} | item_id={it.get('item_id')} | {str(buy_info)}")
+
 
             user_seen_items[user_id].add(key)
             await db_mark_seen(user_id, key)
@@ -821,7 +821,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     if bought:
                         await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
                     else:
-                        await send_bot_message(chat_id, f"⚠️ Автопокупка не выполнена: {source['label']} | item_id={item.get('item_id')} | {str(buy_info)}")
+
 
                 card = make_card(item, source["label"])
                 kb = make_kb(item)
@@ -1295,13 +1295,7 @@ async def start_mini_app_server():
 async def main():
     global bot
     print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
-    if not has_valid_telegram_token(API_TOKEN):
-        raise RuntimeError(
-            "Невалидный API_TOKEN. Укажите корректный Telegram Bot token в config.py или env API_TOKEN/BOT_TOKEN"
-        )
-    if not LZT_API_KEY:
-        print("[BOT] Внимание: LZT_API_KEY не задан. Мониторинг будет работать, автобай отключен.")
-    bot = Bot(token=API_TOKEN)
+
     await init_db()
     # start background reporter
     web_runner = await start_mini_app_server()
