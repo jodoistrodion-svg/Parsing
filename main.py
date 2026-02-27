@@ -307,7 +307,7 @@ def main_kb():
             [KeyboardButton(text="🧹 Очистить фильтры"), KeyboardButton(text="🚀 Старт охотника")],
             [KeyboardButton(text="🛑 Стоп охотника"), KeyboardButton(text="💎 Баланс")],
             [KeyboardButton(text="🪄 Mini App"), KeyboardButton(text="📊 Краткий статус")],
-            [KeyboardButton(text="⚙️ Автобай"), KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="ℹ️ Помощь")],
             [KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
@@ -332,10 +332,9 @@ COMMANDS_MENU = (
     "<b>🚀 Старт охотника / 🛑 Стоп охотника</b>\n"
     "Включает или останавливает фоновый мониторинг.\n\n"
     "<b>💎 Баланс / 🪄 Mini App</b>\n"
-    "Пополнение внутреннего баланса и удобный интерфейс mini app.\n\n"
-    "<b>⚙️ Автобай</b>\n"
-    "Быстрый переход к настройке автобая по каждому URL."
+    "Пополнение внутреннего баланса и удобный интерфейс mini app."
 )
+
 
 # ---------------------- HTTP / API с экспоненциальным retry ----------------------
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -424,10 +423,6 @@ async def get_all_sources(user_id: int, enabled_only: bool = False):
         return [s for s in user_urls[user_id] if s.get("enabled", True)]
     return user_urls[user_id]
 
-async def get_autobuy_sources(user_id: int):
-    sources = await get_all_sources(user_id, enabled_only=True)
-    return [s for s in sources if s.get("autobuy", False)]
-
 # ---------------------- ПАРСИНГ ВСЕХ ИСТОЧНИКОВ ----------------------
 async def fetch_all_sources(user_id: int):
     sources = await get_all_sources(user_id, enabled_only=True)
@@ -439,7 +434,6 @@ async def fetch_all_sources(user_id: int):
             "idx": idx + 1,
             "url": url,
             "enabled": source.get("enabled", True),
-            "autobuy": source.get("autobuy", False),
             "label": f"URL #{idx+1}",
         }
         items, err = await fetch_with_retry(url)
@@ -809,6 +803,7 @@ async def try_autobuy_item(source: dict, item: dict):
     except Exception as e:
         return False, str(e)
 
+        main
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
@@ -843,6 +838,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
+
                 if source.get("autobuy", False):
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
@@ -850,6 +846,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     else:
                         await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
 
+         main
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
 
@@ -997,22 +994,7 @@ async def handle_callbacks(call: types.CallbackQuery):
         return
 
     if data.startswith("autobuyurl:"):
-        try:
-            idx = int(data.split(":", 1)[1])
-        except (TypeError, ValueError):
-            await call.answer("Некорректный индекс URL", show_alert=True)
-            return
-        sources = await get_all_sources(user_id)
-        if 0 <= idx < len(sources):
-            source = sources[idx]
-            new_autobuy = not source.get("autobuy", False)
-            source["autobuy"] = new_autobuy
-            await db_set_url_autobuy(user_id, source["url"], new_autobuy)
-            kb = build_urls_list_kb_sync(sources)
-            await call.message.edit_reply_markup(reply_markup=kb)
-            await call.answer("Автопокупка включена" if new_autobuy else "Автопокупка выключена")
-            return
-        await call.answer("Некорректный индекс URL", show_alert=True)
+        await call.answer("Автобай отключён", show_alert=True)
         return
 
     if data.startswith("testurl:"):
@@ -1053,7 +1035,6 @@ async def status_cmd(message: types.Message):
         f"🔸 Охотник: {'ВКЛ' if active else 'ВЫКЛ'}",
         f"🔸 Источников всего: {len(await get_all_sources(user_id))}",
         f"🔸 Источников активных: {len(await get_all_sources(user_id, enabled_only=True))}",
-        f"🔸 Источников с автобаем: {len(await get_autobuy_sources(user_id))}",
         f"🔸 Увидено лотов: {len(user_seen_items[user_id])}",
         f"🔸 Ошибок API (за текущий период): {user_api_errors.get(user_id, 0)}",
     ]
@@ -1066,14 +1047,11 @@ def build_urls_list_kb_sync(sources: list) -> InlineKeyboardMarkup:
         url = source["url"]
         enabled = source.get("enabled", True)
         label = url if len(url) <= URL_LABEL_MAX else url[:URL_LABEL_MAX-3] + "..."
-        autobuy = source.get("autobuy", False)
         state = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
-        buy_state = "🛒 АВТОБАЙ ВКЛ" if autobuy else "🛒 АВТОБАЙ ВЫКЛ"
-        rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1} ({state}, {buy_state}): {label}", callback_data="noop")])
+        rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1} ({state}): {label}", callback_data="noop")])
         rows.append([
             InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
             InlineKeyboardButton(text=f"🔁 {'Выключить' if enabled else 'Включить'}", callback_data=f"togurl:{idx}"),
-            InlineKeyboardButton(text=f"🛒 {'Выключить автобай' if autobuy else 'Включить автобай'}", callback_data=f"autobuyurl:{idx}"),
             InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}")
         ])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
@@ -1163,8 +1141,7 @@ async def buttons_handler(message: types.Message):
                 user_seen_items[user_id] = await db_load_seen(user_id)
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
-                autobuy_count = len([s for s in active_sources if s.get("autobuy")])
-                return await message.answer(f"🧨 Охотник запущен! Активных URL: {len(active_sources)}, с автобаем: {autobuy_count}")
+                return await message.answer(f"🧨 Охотник запущен! Активных URL: {len(active_sources)}")
             else:
                 return await message.answer("⚠ Охотник уже запущен")
 
@@ -1179,24 +1156,17 @@ async def buttons_handler(message: types.Message):
             return await short_status_for_user(user_id, chat_id)
 
         if text == "⚙️ Автобай":
-            kb = await build_urls_list_kb(user_id)
-            return await message.answer(
-                "⚙️ <b>Управление автобаем</b>\n"
-                "Включайте автобай только на нужных URL.\n"
-                "Рекомендуется держать 1-2 источника с автобаем для максимальной скорости.",
-                parse_mode="HTML",
-                reply_markup=kb,
-            )
+            return await message.answer("⚠️ Автобай отключён. Используйте мониторинг и ручную покупку.")
+
 
         if text == "ℹ️ Помощь":
             return await message.answer(
                 "<b>ℹ️ Быстрый гид</b>\n"
                 "1) Добавьте URL через ➕ Добавить URL\n"
                 "2) Проверьте выдачу кнопкой ✨ Проверка лотов\n"
-                "3) Включите автобай у нужного URL в 📚 Мои URL или ⚙️ Автобай\n"
                 "4) Запустите 🚀 Старт охотника\n\n"
-                "Если видите 404 на buy: бот автоматически пробует несколько buy/fast-buy эндпоинтов.\n"
-                "Проверьте, что API-ключ имеет scope <code>market</code> и задан секретный ответ.",
+                "Бот отправляет только уведомления о новых лотах.\n"
+                "Покупка выполняется вручную по кнопке в карточке.",
                 parse_mode="HTML",
             )
 
@@ -1245,9 +1215,8 @@ async def short_status_for_user(user_id: int, chat_id: int):
     seen = len(user_seen_items[user_id])
     total = len(await get_all_sources(user_id))
     enabled = len(await get_all_sources(user_id, enabled_only=True))
-    autobuy = len(await get_autobuy_sources(user_id))
     balance = await db_get_balance(user_id)
-    await send_bot_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+    await send_bot_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
 
 
 
