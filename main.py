@@ -295,6 +295,7 @@ def main_kb():
             [KeyboardButton(text="🧹 Очистить фильтры"), KeyboardButton(text="🚀 Старт охотника")],
             [KeyboardButton(text="🛑 Стоп охотника"), KeyboardButton(text="💎 Баланс")],
             [KeyboardButton(text="🪄 Mini App"), KeyboardButton(text="📊 Краткий статус")],
+            [KeyboardButton(text="⚙️ Автобай"), KeyboardButton(text="ℹ️ Помощь")],
             [KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
@@ -319,7 +320,9 @@ COMMANDS_MENU = (
     "<b>🚀 Старт охотника / 🛑 Стоп охотника</b>\n"
     "Включает или останавливает фоновый мониторинг.\n\n"
     "<b>💎 Баланс / 🪄 Mini App</b>\n"
-    "Пополнение внутреннего баланса и удобный интерфейс mini app."
+    "Пополнение внутреннего баланса и удобный интерфейс mini app.\n\n"
+    "<b>⚙️ Автобай</b>\n"
+    "Быстрый переход к настройке автобая по каждому URL."
 )
 
 # ---------------------- HTTP / API с экспоненциальным retry ----------------------
@@ -616,6 +619,9 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         await asyncio.sleep(0.2)
 
 async def try_autobuy_item(source: dict, item: dict):
+    if not LZT_API_KEY:
+        return False, "LZT_API_KEY не задан"
+
     item_id = item.get("item_id") or item.get("id")
     if not item_id:
         return False, "missing_item_id"
@@ -676,10 +682,12 @@ async def try_autobuy_item(source: dict, item: dict):
     buy_urls = []
     for base in dedup_bases:
         buy_urls.extend([
-            f"{base}/{item_id}/buy",
             f"{base}/{item_id}/fast-buy",
-            f"{base}/market/{item_id}/buy",
+            f"{base}/{item_id}/buy",
             f"{base}/market/{item_id}/fast-buy",
+            f"{base}/market/{item_id}/buy",
+            f"{base}/item/{item_id}/fast-buy",
+            f"{base}/item/{item_id}/buy",
             f"{base}/items/{item_id}/buy",
             f"{base}/items/{item_id}/fast-buy",
         ])
@@ -698,7 +706,14 @@ async def try_autobuy_item(source: dict, item: dict):
         "недостаточно",
         "уже продан",
         "already sold",
+        "already purchased",
+        "already bought",
+        "цена изменилась",
+        "нельзя купить",
+        "forbidden",
+        "access denied",
         "не найден",
+        "не найдена",
         "not found",
     )
 
@@ -709,29 +724,37 @@ async def try_autobuy_item(source: dict, item: dict):
             for payload in payload_variants:
                 async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
                     text = await resp.text()
+                    text = html.unescape(text)
                     text_lower = text.lower()
-                    if resp.status in (200, 201):
+                    if resp.status in (200, 201, 202):
                         return True, f"{buy_url} -> {text[:220]}"
                     if any(marker in text_lower for marker in success_markers):
                         return True, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
                     if "secret" in text_lower or "answer" in text_lower or "секрет" in text_lower:
                         last_err = f"{buy_url} -> HTTP {resp.status}: нужен/неверный ответ на секретный вопрос ({text[:220]})"
                         continue
+                    if resp.status in (401, 403):
+                        return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({text[:220]})"
                     if any(marker in text_lower for marker in terminal_error_markers):
-                        return False, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+                        last_err = f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+                        continue
 
                     # На некоторых версиях API срабатывает только form-urlencoded.
                     form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
                     async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
                         form_text = await form_resp.text()
+                        form_text = html.unescape(form_text)
                         form_text_lower = form_text.lower()
                         if form_resp.status in (200, 201) or any(marker in form_text_lower for marker in success_markers):
                             return True, f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
                         if "secret" in form_text_lower or "answer" in form_text_lower or "секрет" in form_text_lower:
                             last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: нужен/неверный ответ на секретный вопрос ({form_text[:220]})"
                             continue
+                        if form_resp.status in (401, 403):
+                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({form_text[:220]})"
                         if any(marker in form_text_lower for marker in terminal_error_markers):
-                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
+                            last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
+                            continue
                         last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
         return False, last_err
     except Exception as e:
@@ -750,7 +773,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if bought:
                     await bot.send_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
                 else:
-                    await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена (при запуске): {_source['label']} | item_id={it.get('item_id')} | {html.escape(str(buy_info))}")
+                    await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена (при запуске): {_source['label']} | item_id={it.get('item_id')} | {str(buy_info)}")
 
             user_seen_items[user_id].add(key)
             await db_mark_seen(user_id, key)
@@ -786,7 +809,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     if bought:
                         await bot.send_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
                     else:
-                        await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена: {source['label']} | item_id={item.get('item_id')} | {html.escape(str(buy_info))}")
+                        await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена: {source['label']} | item_id={item.get('item_id')} | {str(buy_info)}")
 
                 card = make_card(item, source["label"])
                 kb = make_kb(item)
@@ -970,10 +993,6 @@ async def handle_callbacks(call: types.CallbackQuery):
 
     if data == "noop":
         await call.answer()
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
         return
 
     await call.answer()
@@ -1094,12 +1113,16 @@ async def buttons_handler(message: types.Message):
             return await send_compact_10_for_user(user_id, chat_id)
 
         if text == "🚀 Старт охотника":
+            active_sources = await get_all_sources(user_id, enabled_only=True)
+            if not active_sources:
+                return await message.answer("❌ Нет активных URL. Добавьте источник или включите URL в 📚 Мои URL.")
             if not user_search_active[user_id]:
                 user_search_active[user_id] = True
                 user_seen_items[user_id] = await db_load_seen(user_id)
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
-                return await message.answer("🧨 Охотник запущен!")
+                autobuy_count = len([s for s in active_sources if s.get("autobuy")])
+                return await message.answer(f"🧨 Охотник запущен! Активных URL: {len(active_sources)}, с автобаем: {autobuy_count}")
             else:
                 return await message.answer("⚠ Охотник уже запущен")
 
@@ -1112,6 +1135,28 @@ async def buttons_handler(message: types.Message):
 
         if text == "📊 Краткий статус":
             return await short_status_for_user(user_id, chat_id)
+
+        if text == "⚙️ Автобай":
+            kb = await build_urls_list_kb(user_id)
+            return await message.answer(
+                "⚙️ <b>Управление автобаем</b>\n"
+                "Включайте автобай только на нужных URL.\n"
+                "Рекомендуется держать 1-2 источника с автобаем для максимальной скорости.",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+
+        if text == "ℹ️ Помощь":
+            return await message.answer(
+                "<b>ℹ️ Быстрый гид</b>\n"
+                "1) Добавьте URL через ➕ Добавить URL\n"
+                "2) Проверьте выдачу кнопкой ✨ Проверка лотов\n"
+                "3) Включите автобай у нужного URL в 📚 Мои URL или ⚙️ Автобай\n"
+                "4) Запустите 🚀 Старт охотника\n\n"
+                "Если видите 404 на buy: бот автоматически пробует несколько buy/fast-buy эндпоинтов.\n"
+                "Проверьте, что API-ключ имеет scope <code>market</code> и задан секретный ответ.",
+                parse_mode="HTML",
+            )
 
         if text == "💎 Баланс":
             balance = await db_get_balance(user_id)
@@ -1237,6 +1282,10 @@ async def start_mini_app_server():
 # ---------------------- RUN ----------------------
 async def main():
     print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
+    if not API_TOKEN:
+        raise RuntimeError("API_TOKEN не задан. Укажите переменную окружения API_TOKEN")
+    if not LZT_API_KEY:
+        print("[BOT] Внимание: LZT_API_KEY не задан. Мониторинг будет работать, автобай отключен.")
     await init_db()
     # start background reporter
     web_runner = await start_mini_app_server()
