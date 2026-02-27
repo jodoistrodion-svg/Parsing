@@ -706,9 +706,9 @@ async def try_autobuy_item(source: dict, item: dict):
 
     success_markers = (
         "success",
-        "ok",
         "purchased",
         "already bought",
+        "already purchased",
         "уже куп",
     )
 
@@ -729,6 +729,64 @@ async def try_autobuy_item(source: dict, item: dict):
         "not found",
     )
 
+    def _extract_response_error(data):
+        if not isinstance(data, dict):
+            return None
+        status = str(data.get("status", "")).lower()
+        if status in {"error", "failed", "fail"}:
+            return f"status={status}"
+        for key in ("error", "message", "msg", "description"):
+            value = data.get(key)
+            if isinstance(value, str):
+                value = value.strip()
+                if value and any(marker in value.lower() for marker in terminal_error_markers):
+                    return value
+        errors = data.get("errors")
+        if errors:
+            if isinstance(errors, list):
+                rendered = "; ".join(str(e) for e in errors if e)
+                return rendered[:220] if rendered else "errors"
+            if isinstance(errors, dict):
+                rendered = "; ".join(f"{k}: {v}" for k, v in errors.items())
+                return rendered[:220] if rendered else "errors"
+            return str(errors)[:220]
+        return None
+
+    def _is_purchase_success(resp_status: int, raw_text: str):
+        text = html.unescape(raw_text or "")
+        text_lower = text.lower()
+
+        if any(marker in text_lower for marker in terminal_error_markers):
+            return False, text
+
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+        json_error = _extract_response_error(parsed)
+        if json_error:
+            return False, json_error
+
+        if isinstance(parsed, dict):
+            data = parsed.get("data")
+            nested_status = str((data or {}).get("status", "")).lower() if isinstance(data, dict) else ""
+            if nested_status in {"success", "purchased", "bought", "ok"}:
+                return True, text
+            for key in ("is_purchased", "purchased", "success", "ok", "done"):
+                if (key in parsed and parsed.get(key) is True) or (isinstance(data, dict) and data.get(key) is True):
+                    return True, text
+
+        if any(marker in text_lower for marker in success_markers):
+            return True, text
+
+        if resp_status in (200, 201, 202):
+            # HTTP 2xx сам по себе не считается покупкой — API может вернуть ошибку в теле.
+            return False, text or f"HTTP {resp_status} без подтверждения покупки"
+
+        return False, text
+
     last_err = "unknown"
     try:
         session = await get_session()
@@ -736,17 +794,19 @@ async def try_autobuy_item(source: dict, item: dict):
             for payload in payload_variants:
                 async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
                     text = await resp.text()
+                    success, reason = _is_purchase_success(resp.status, text)
                     text = html.unescape(text)
                     text_lower = text.lower()
-                    if resp.status in (200, 201, 202):
-                        return True, f"{buy_url} -> {text[:220]}"
-                    if any(marker in text_lower for marker in success_markers):
-                        return True, f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
+                    if success:
+                        return True, f"{buy_url} -> HTTP {resp.status}: {reason[:220]}"
                     if "secret" in text_lower or "answer" in text_lower or "секрет" in text_lower:
                         last_err = f"{buy_url} -> HTTP {resp.status}: нужен/неверный ответ на секретный вопрос ({text[:220]})"
                         continue
                     if resp.status in (401, 403):
                         return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({text[:220]})"
+                    if reason and reason != text:
+                        last_err = f"{buy_url} -> HTTP {resp.status}: {str(reason)[:220]}"
+                        continue
                     if any(marker in text_lower for marker in terminal_error_markers):
                         last_err = f"{buy_url} -> HTTP {resp.status}: {text[:220]}"
                         continue
@@ -755,15 +815,19 @@ async def try_autobuy_item(source: dict, item: dict):
                     form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
                     async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
                         form_text = await form_resp.text()
+                        success, reason = _is_purchase_success(form_resp.status, form_text)
                         form_text = html.unescape(form_text)
                         form_text_lower = form_text.lower()
-                        if form_resp.status in (200, 201) or any(marker in form_text_lower for marker in success_markers):
-                            return True, f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
+                        if success:
+                            return True, f"{buy_url} (form) -> HTTP {form_resp.status}: {reason[:220]}"
                         if "secret" in form_text_lower or "answer" in form_text_lower or "секрет" in form_text_lower:
                             last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: нужен/неверный ответ на секретный вопрос ({form_text[:220]})"
                             continue
                         if form_resp.status in (401, 403):
                             return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({form_text[:220]})"
+                        if reason and reason != form_text:
+                            last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {str(reason)[:220]}"
+                            continue
                         if any(marker in form_text_lower for marker in terminal_error_markers):
                             last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {form_text[:220]}"
                             continue
