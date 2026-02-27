@@ -42,7 +42,10 @@ LIMITED_EXTRA_DELAY = 3.0  # seconds added for limited users
 DB_FILE = "bot_data.sqlite"
 WEBAPP_HOST = "0.0.0.0"
 WEBAPP_PORT = 8080
+
+# Секретное слово (по умолчанию "Мазда")
 LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
+
 MINI_APP_TITLE = "Parsing Bot · Mini App"
 WEBAPP_PUBLIC_URL = (
     os.getenv("WEBAPP_PUBLIC_URL")
@@ -211,7 +214,10 @@ async def db_get_last_report(user_id: int):
 
 async def db_set_last_report(user_id: int, ts: int):
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET last_error_report=? WHERE user_id=?", (ts, user_id))
+        await db.execute(
+            "UPDATE users SET last_error_report=? WHERE user_id=?",
+            (ts, user_id),
+        )
         await db.commit()
 
 
@@ -461,6 +467,7 @@ async def validate_url_before_add(url: str):
 # ---------------------- ИСТОЧНИКИ ----------------------
 async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
+
     # защита от случайных дубликатов в памяти
     deduped = []
     seen = set()
@@ -706,13 +713,14 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         await asyncio.sleep(0.2)
 
 
-# ---------------------- АВТОПОКУПКА (ОТКЛЮЧЕНА В UI, НО КОД ИСПРАВЛЕН) ----------------------
+# ---------------------- АВТОПОКУПКА ----------------------
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
     payload: dict = {}
     if price is not None:
         payload.update({"price": price, "item_price": price, "amount": price})
 
+    # секретный ответ/слово
     if LZT_SECRET_WORD:
         payload.update(
             {
@@ -743,21 +751,16 @@ def _autobuy_payload_variants(item: dict):
 
 
 def _autobuy_buy_urls(source_url: str, item_id: int):
-    source_url = (source_url or "").strip()
-    source_base = ""
-    try:
-        parts = urlsplit(source_url)
-        if parts.scheme and parts.netloc:
-            source_base = f"{parts.scheme}://{parts.netloc}"
-    except Exception:
-        source_base = ""
+    """
+    Основной хост для покупки (fast-buy) обычно prod-api.
+    Оставляем fallback на api.lzt.market / api.lolz.live.
+    """
+    source_url = (source_url or "").strip().lower()
 
-    base_hosts = []
-    if "api.lolz.live" in source_url.lower():
+    base_hosts = ["https://prod-api.lzt.market"]
+    if "api.lolz.live" in source_url:
         base_hosts.append("https://api.lolz.live")
-    if source_base:
-        base_hosts.append(source_base)
-    base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
+    base_hosts.append("https://api.lzt.market")
 
     dedup_bases = []
     seen_bases = set()
@@ -771,15 +774,13 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
         "{id}/fast-buy",
         "{id}/buy",
         "{id}/purchase",
+        "{id}/check-account",
         "market/{id}/fast-buy",
         "market/{id}/buy",
-        "market/{id}/purchase",
         "item/{id}/fast-buy",
         "item/{id}/buy",
-        "item/{id}/purchase",
-        "items/{id}/buy",
         "items/{id}/fast-buy",
-        "items/{id}/purchase",
+        "items/{id}/buy",
     ]
 
     urls = []
@@ -801,41 +802,36 @@ def _autobuy_classify_response(status: int, text: str):
       - auth: проблемы с ключом/правами
       - secret: нужен/неверный ответ на секретный вопрос
       - terminal: лот уже куплен/продан/недостаточно средств и т.п. (останавливаем)
+      - retry_request: сервер просит повторить запрос
       - retry: пробуем следующий endpoint/вариант payload
     """
     text = html.unescape(text or "")
     lower = text.lower()
 
+    if "retry_request" in lower:
+        return "retry_request", text[:220]
+
     success_markers = ("success", "ok", "purchased", "purchase complete", "already bought", "уже куп")
     terminal_error_markers = (
-        "insufficient",
-        "not enough",
-        "недостаточно",
-        "уже продан",
-        "already sold",
-        "already purchased",
-        "already bought",
-        "цена изменилась",
-        "нельзя купить",
-        "forbidden",
-        "access denied",
+        "insufficient", "not enough", "недостаточно",
+        "уже продан", "already sold",
+        "already purchased", "already bought",
+        "цена изменилась", "нельзя купить",
+        "forbidden", "access denied",
     )
 
-    # 404/405 по неверному пути покупки не должны останавливать весь автобай
     if status in (404, 405):
         return "retry", text[:220]
-
     if status in (200, 201, 202):
         return "success", text[:220]
     if status in (401, 403):
         return "auth", text[:220]
     if "secret" in lower or "answer" in lower or "секрет" in lower:
         return "secret", text[:220]
-    if any(marker in lower for marker in success_markers):
+    if any(m in lower for m in success_markers):
         return "success", text[:220]
-    if any(marker in lower for marker in terminal_error_markers):
+    if any(m in lower for m in terminal_error_markers):
         return "terminal", text[:220]
-
     return "retry", text[:220]
 
 
@@ -862,44 +858,76 @@ async def try_autobuy_item(source: dict, item: dict):
     buy_urls = _autobuy_buy_urls(source.get("url") or "", item_id)
 
     last_err = "unknown"
+    session = await get_session()
+
+    # retry_request может просить повторить до больших значений,
+    # но в боте лучше ограничить, чтобы не улететь в лимиты.
+    MAX_RETRY_REQUEST = 15
+    RETRY_REQUEST_DELAY = 0.25
+
     try:
-        session = await get_session()
         for buy_url in buy_urls:
             for payload in payload_variants:
-                # JSON
-                async with session.post(
-                    buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT
-                ) as resp:
-                    body = await resp.text()
-                    state, info = _autobuy_classify_response(resp.status, body)
+                # 1) JSON POST
+                retry_req_count = 0
+                while True:
+                    async with session.post(
+                        buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT
+                    ) as resp:
+                        body = await resp.text()
+                        state, info = _autobuy_classify_response(resp.status, body)
+
                     if state == "success":
                         return True, f"{buy_url} -> {info}"
                     if state == "auth":
                         return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
                         last_err = f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                        continue
+                        break
                     if state == "terminal":
                         return False, f"{buy_url} -> {info}"
-                    last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
 
-                # form (на всякий случай)
+                    if state == "retry_request":
+                        retry_req_count += 1
+                        if retry_req_count >= MAX_RETRY_REQUEST:
+                            last_err = f"{buy_url} -> слишком много retry_request ({info})"
+                            break
+                        await asyncio.sleep(RETRY_REQUEST_DELAY)
+                        continue
+
+                    last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
+                    break
+
+                # 2) form POST (fallback)
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-                async with session.post(
-                    buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT
-                ) as form_resp:
-                    form_body = await form_resp.text()
-                    state, info = _autobuy_classify_response(form_resp.status, form_body)
+                retry_req_count = 0
+                while True:
+                    async with session.post(
+                        buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT
+                    ) as resp:
+                        body = await resp.text()
+                        state, info = _autobuy_classify_response(resp.status, body)
+
                     if state == "success":
                         return True, f"{buy_url} (form) -> {info}"
                     if state == "auth":
-                        return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
+                        return False, f"{buy_url} (form) -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
                         last_err = f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
-                        continue
+                        break
                     if state == "terminal":
                         return False, f"{buy_url} (form) -> {info}"
-                    last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
+
+                    if state == "retry_request":
+                        retry_req_count += 1
+                        if retry_req_count >= MAX_RETRY_REQUEST:
+                            last_err = f"{buy_url} (form) -> слишком много retry_request ({info})"
+                            break
+                        await asyncio.sleep(RETRY_REQUEST_DELAY)
+                        continue
+
+                    last_err = f"{buy_url} (form) -> HTTP {resp.status}: {info}"
+                    break
 
         return False, last_err
     except Exception as e:
@@ -909,6 +937,7 @@ async def try_autobuy_item(source: dict, item: dict):
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
+
     # первичная "засветка"
     try:
         items_with_sources, _ = await fetch_all_sources(user_id)
@@ -938,24 +967,26 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if key in user_seen_items[user_id]:
                     continue
 
-                # если не проходит фильтр — помечаем как seen, но не показываем
+                # если не проходит фильтр — помечаем seen, но не показываем
                 if not passes_filters(item, user_id):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
 
-                # автобай (в UI он выключен, но логика рабочая)
+                # автобай
                 if source.get("autobuy", False):
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
                         await send_bot_message(
                             chat_id,
-                            f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}",
+                            f"🛒 <b>Автопокупка успешна</b>\n{source['label']} | item_id=<b>{html.escape(str(item.get('item_id')))}</b>\n✅ {html.escape(buy_info)}",
+                            parse_mode="HTML",
                         )
                     else:
                         await send_bot_message(
                             chat_id,
-                            f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}",
+                            f"⚠️ <b>Автопокупка не удалась</b>\n{source['label']} | item_id=<b>{html.escape(str(item.get('item_id')))}</b>\n❌ {html.escape(str(buy_info))}",
+                            parse_mode="HTML",
                         )
 
                 user_seen_items[user_id].add(key)
@@ -1119,7 +1150,32 @@ async def handle_callbacks(call: types.CallbackQuery):
         return
 
     if data.startswith("autobuyurl:"):
-        await call.answer("Автобай отключён", show_alert=True)
+        # ВАЖНО: чтобы случайно не включить у всех — ограничим автобай админом.
+        role = await get_user_role(user_id)
+        if role != "admin":
+            await call.answer("Автобай доступен только администратору", show_alert=True)
+            return
+
+        try:
+            idx = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await call.answer("Некорректный индекс URL", show_alert=True)
+            return
+
+        sources = await get_all_sources(user_id)
+        if 0 <= idx < len(sources):
+            source = sources[idx]
+            new_autobuy = not source.get("autobuy", False)
+            source["autobuy"] = new_autobuy
+            await db_set_url_autobuy(user_id, source["url"], new_autobuy)
+
+            kb = build_urls_list_kb_sync(sources)
+            await call.message.edit_reply_markup(reply_markup=kb)
+
+            await call.answer("Автобай включён" if new_autobuy else "Автобай выключен")
+            return
+
+        await call.answer("Некорректный индекс URL", show_alert=True)
         return
 
     if data.startswith("testurl:"):
@@ -1173,16 +1229,32 @@ def build_urls_list_kb_sync(sources: list) -> InlineKeyboardMarkup:
     for idx, source in enumerate(sources):
         url = source["url"]
         enabled = source.get("enabled", True)
+        autobuy = source.get("autobuy", False)
+
         label = url if len(url) <= URL_LABEL_MAX else url[: URL_LABEL_MAX - 3] + "..."
         state = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+        ab_state = "🛒 ON" if autobuy else "🛒 OFF"
+
         rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1} ({state}): {label}", callback_data="noop")])
         rows.append(
             [
                 InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
-                InlineKeyboardButton(text=f"🔁 {'Выключить' if enabled else 'Включить'}", callback_data=f"togurl:{idx}"),
+                InlineKeyboardButton(
+                    text=f"🔁 {'Выключить' if enabled else 'Включить'}",
+                    callback_data=f"togurl:{idx}",
+                ),
                 InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}"),
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{ab_state} (URL #{idx+1})",
+                    callback_data=f"autobuyurl:{idx}",
+                )
+            ]
+        )
+
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1288,17 +1360,15 @@ async def buttons_handler(message: types.Message):
         if text == "📊 Краткий статус":
             return await short_status_for_user(user_id, chat_id)
 
-        if text == "⚙️ Автобай":
-            return await message.answer("⚠️ Автобай отключён. Используйте мониторинг и ручную покупку.")
-
         if text == "ℹ️ Помощь":
             return await message.answer(
                 "<b>ℹ️ Быстрый гид</b>\n"
                 "1) Добавьте URL через ➕ Добавить URL\n"
                 "2) Проверьте выдачу кнопкой ✨ Проверка лотов\n"
+                "3) (опционально) Включите 🛒 ON у нужного URL в 📚 Мои URL (только админ)\n"
                 "4) Запустите 🚀 Старт охотника\n\n"
-                "Бот отправляет только уведомления о новых лотах.\n"
-                "Покупка выполняется вручную по кнопке в карточке.",
+                "Бот отправляет уведомления о новых лотах.\n"
+                "Если включён 🛒 ON — пробует купить автоматически.",
                 parse_mode="HTML",
             )
 
@@ -1446,7 +1516,7 @@ async def start_mini_app_server():
 # ---------------------- RUN ----------------------
 async def main():
     global bot
-    print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
+    print("[BOT] Запуск: multiuser, aiosqlite, retry/backoff, per-user limits, mini-app, autobuy toggle...")
 
     if bot is None:
         if not has_valid_telegram_token(API_TOKEN):
