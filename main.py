@@ -624,6 +624,186 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
             await send_bot_message(chat_id, card)
         await asyncio.sleep(0.2)
 
+def _autobuy_payload_variants(item: dict):
+    price = item.get("price")
+    payload = {}
+    if price is not None:
+        payload.update({"price": price, "item_price": price, "amount": price})
+
+    if LZT_SECRET_WORD:
+        payload.update({
+            "secret_answer": LZT_SECRET_WORD,
+            "secret_word": LZT_SECRET_WORD,
+            "secretWord": LZT_SECRET_WORD,
+            "qa_answer": LZT_SECRET_WORD,
+            "answer": LZT_SECRET_WORD,
+        })
+
+    variants = [
+        payload,
+        {**payload, "confirm": 1, "is_confirmed": True},
+        {**payload, "fast_buy": 1, "instant_buy": 1},
+        {k: v for k, v in payload.items() if k not in {"price", "item_price", "amount"}},
+    ]
+
+    dedup = []
+    seen = set()
+    for var in variants:
+        frozen = tuple(sorted(var.items()))
+        if frozen in seen:
+            continue
+        seen.add(frozen)
+        dedup.append(var)
+    return dedup
+
+
+def _autobuy_buy_urls(source_url: str, item_id: int):
+    source_url = (source_url or "").strip()
+    source_base = ""
+    try:
+        parts = urlsplit(source_url)
+        if parts.scheme and parts.netloc:
+            source_base = f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        source_base = ""
+
+    base_hosts = []
+    if "api.lolz.live" in source_url.lower():
+        base_hosts.append("https://api.lolz.live")
+    if source_base:
+        base_hosts.append(source_base)
+    base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
+
+    dedup_bases = []
+    seen_bases = set()
+    for base in base_hosts:
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        dedup_bases.append(base)
+
+    paths = [
+        "{id}/fast-buy",
+        "{id}/buy",
+        "{id}/purchase",
+        "market/{id}/fast-buy",
+        "market/{id}/buy",
+        "market/{id}/purchase",
+        "item/{id}/fast-buy",
+        "item/{id}/buy",
+        "item/{id}/purchase",
+        "items/{id}/buy",
+        "items/{id}/fast-buy",
+        "items/{id}/purchase",
+    ]
+
+    urls = []
+    seen = set()
+    for base in dedup_bases:
+        for tpl in paths:
+            url = f"{base}/{tpl.format(id=item_id)}"
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _autobuy_classify_response(status: int, text: str):
+    text = html.unescape(text or "")
+    lower = text.lower()
+
+    success_markers = (
+        "success", "ok", "purchased", "purchase complete", "already bought", "уже куп"
+    )
+    terminal_error_markers = (
+        "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
+        "already purchased", "already bought", "цена изменилась", "нельзя купить",
+        "forbidden", "access denied"
+    )
+
+    # 404/405 по неверному пути покупки не должны останавливать весь автобай:
+    # продолжаем перебор следующих endpoint'ов.
+    if status in (404, 405):
+        return "retry", text[:220]
+        "forbidden", "access denied", "не найден", "не найдена", "not found"
+    )
+
+ main
+    if status in (200, 201, 202):
+        return "success", text[:220]
+    if status in (401, 403):
+        return "auth", text[:220]
+    if "secret" in lower or "answer" in lower or "секрет" in lower:
+        return "secret", text[:220]
+    if any(marker in lower for marker in success_markers):
+        return "success", text[:220]
+    if any(marker in lower for marker in terminal_error_markers):
+        return "terminal", text[:220]
+    return "retry", text[:220]
+
+
+async def try_autobuy_item(source: dict, item: dict):
+    if not LZT_API_KEY:
+        return False, "LZT_API_KEY не задан"
+
+    item_id = item.get("item_id") or item.get("id")
+    if not item_id:
+        return False, "missing_item_id"
+
+    try:
+        item_id = int(item_id)
+    except (TypeError, ValueError):
+        return False, f"invalid_item_id={item_id}"
+
+    headers = {
+        "Authorization": f"Bearer {LZT_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    payload_variants = _autobuy_payload_variants(item)
+    buy_urls = _autobuy_buy_urls(source.get("url") or "", item_id)
+
+    last_err = "unknown"
+    try:
+        session = await get_session()
+        for buy_url in buy_urls:
+            for payload in payload_variants:
+                async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
+                    body = await resp.text()
+                    state, info = _autobuy_classify_response(resp.status, body)
+                    if state == "success":
+                        return True, f"{buy_url} -> {info}"
+                    if state == "auth":
+                        return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
+                    if state == "secret":
+                        last_err = f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                        continue
+                    if state == "terminal":
+                        return False, f"{buy_url} -> {info}"
+                    last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
+
+                form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+                async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
+                    form_body = await form_resp.text()
+                    state, info = _autobuy_classify_response(form_resp.status, form_body)
+                    if state == "success":
+                        return True, f"{buy_url} (form) -> {info}"
+                    if state == "auth":
+                        return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
+                    if state == "secret":
+                        last_err = f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
+                        continue
+                    if state == "terminal":
+                        return False, f"{buy_url} (form) -> {info}"
+                    last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
+
+        return False, last_err
+    except Exception as e:
+        return False, str(e)
+
+        main
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
@@ -658,6 +838,15 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
+
+                if source.get("autobuy", False):
+                    bought, buy_info = await try_autobuy_item(source, item)
+                    if bought:
+                        await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
+                    else:
+                        await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
+
+         main
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
 
