@@ -23,7 +23,7 @@ from aiohttp import web
 
 from config import API_TOKEN, LZT_API_KEY
 
-bot = None
+bot: Bot | None = None
 dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
@@ -63,10 +63,12 @@ async def send_bot_message(chat_id: int, text: str, **kwargs):
         raise RuntimeError("Bot не инициализирован")
     return await bot.send_message(chat_id, text, **kwargs)
 
+
 # ---------------------- АИО-SQLITE (асинхронная БД) ----------------------
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS urls (
             user_id INTEGER,
             url TEXT,
@@ -75,71 +77,95 @@ async def init_db():
             autobuy INTEGER DEFAULT 0,
             PRIMARY KEY(user_id, url)
         )
-        """)
+        """
+        )
         cur = await db.execute("PRAGMA table_info(urls)")
         cols = [row[1] for row in await cur.fetchall()]
         if "enabled" not in cols:
             await db.execute("ALTER TABLE urls ADD COLUMN enabled INTEGER DEFAULT 1")
         if "autobuy" not in cols:
             await db.execute("ALTER TABLE urls ADD COLUMN autobuy INTEGER DEFAULT 0")
-        await db.execute("""
+
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS seen (
             user_id INTEGER,
             item_key TEXT,
             seen_at INTEGER,
             PRIMARY KEY(user_id, item_key)
         )
-        """)
-        await db.execute("""
+        """
+        )
+
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             role TEXT DEFAULT 'unknown',
             last_error_report INTEGER DEFAULT 0,
             balance REAL DEFAULT 0
         )
-        """)
+        """
+        )
         cur = await db.execute("PRAGMA table_info(users)")
         user_cols = [row[1] for row in await cur.fetchall()]
         if "balance" not in user_cols:
             await db.execute("ALTER TABLE users ADD COLUMN balance REAL DEFAULT 0")
+
         await db.commit()
+
 
 async def db_add_url(user_id: int, url: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "INSERT OR IGNORE INTO urls(user_id, url, added_at, enabled, autobuy) VALUES (?, ?, ?, 1, 0)",
-            (user_id, url, int(time.time()))
+            (user_id, url, int(time.time())),
         )
         await db.commit()
+
 
 async def db_remove_url(user_id: int, url: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("DELETE FROM urls WHERE user_id=? AND url=?", (user_id, url))
         await db.commit()
 
+
 async def db_get_urls(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
-        cur = await db.execute("SELECT url, enabled, autobuy FROM urls WHERE user_id=? ORDER BY added_at", (user_id,))
+        cur = await db.execute(
+            "SELECT url, enabled, autobuy FROM urls WHERE user_id=? ORDER BY added_at",
+            (user_id,),
+        )
         rows = await cur.fetchall()
         return [{"url": r[0], "enabled": bool(r[1]), "autobuy": bool(r[2])} for r in rows]
 
+
 async def db_set_url_enabled(user_id: int, url: str, enabled: bool):
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE urls SET enabled=? WHERE user_id=? AND url=?", (1 if enabled else 0, user_id, url))
+        await db.execute(
+            "UPDATE urls SET enabled=? WHERE user_id=? AND url=?",
+            (1 if enabled else 0, user_id, url),
+        )
         await db.commit()
+
 
 async def db_set_url_autobuy(user_id: int, url: str, autobuy: bool):
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE urls SET autobuy=? WHERE user_id=? AND url=?", (1 if autobuy else 0, user_id, url))
+        await db.execute(
+            "UPDATE urls SET autobuy=? WHERE user_id=? AND url=?",
+            (1 if autobuy else 0, user_id, url),
+        )
         await db.commit()
+
 
 async def db_mark_seen(user_id: int, key: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "INSERT OR IGNORE INTO seen(user_id, item_key, seen_at) VALUES (?, ?, ?)",
-            (user_id, key, int(time.time()))
+            (user_id, key, int(time.time())),
         )
         await db.commit()
+
 
 async def db_load_seen(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -147,13 +173,15 @@ async def db_load_seen(user_id: int):
         rows = await cur.fetchall()
         return {r[0] for r in rows}
 
+
 async def db_ensure_user(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users(user_id, role, last_error_report, balance) VALUES (?, ?, ?, ?)",
-            (user_id, "unknown", 0, 0)
+            (user_id, "unknown", 0, 0),
         )
         await db.commit()
+
 
 async def db_get_role(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -161,20 +189,25 @@ async def db_get_role(user_id: int):
         row = await cur.fetchone()
         return row[0] if row else "unknown"
 
+
 async def db_set_role(user_id: int, role: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users(user_id, role, last_error_report, balance) VALUES (?, ?, ?, ?)",
-            (user_id, role, 0, 0)
+            (user_id, role, 0, 0),
         )
         await db.execute("UPDATE users SET role=? WHERE user_id=?", (role, user_id))
         await db.commit()
 
+
 async def db_get_last_report(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
-        cur = await db.execute("SELECT last_error_report FROM users WHERE user_id=?", (user_id,))
+        cur = await db.execute(
+            "SELECT last_error_report FROM users WHERE user_id=?", (user_id,)
+        )
         row = await cur.fetchone()
         return row[0] if row else 0
+
 
 async def db_set_last_report(user_id: int, ts: int):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -188,14 +221,19 @@ async def db_get_balance(user_id: int) -> float:
         row = await cur.fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
 
+
 async def db_change_balance(user_id: int, amount: float) -> float:
     await db_ensure_user(user_id)
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE user_id=?", (amount, user_id))
+        await db.execute(
+            "UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE user_id=?",
+            (amount, user_id),
+        )
         cur = await db.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
         await db.commit()
         return float(row[0]) if row and row[0] is not None else 0.0
+
 
 # ---------------------- ВАЛИДАЦИЯ URL ----------------------
 def validate_market_url(url: str):
@@ -208,6 +246,7 @@ def validate_market_url(url: str):
     if not ("api.lzt.market/" in url or "api.lolz.live/" in url):
         return False, "❌ Нужна ссылка на API LZT (api.lzt.market или api.lolz.live)."
     return True, None
+
 
 # ---------------------- НОРМАЛИЗАЦИЯ URL ----------------------
 def normalize_url(url: str) -> str:
@@ -240,17 +279,18 @@ def normalize_url(url: str) -> str:
 
     return s
 
-# ---------------------- ПЕР-ЮЗЕР ДАННЫЕ (в памяти, синхронизированы с БД) ----------------------
+
+# ---------------------- ПЕР-ЮЗЕР ДАННЫЕ ----------------------
 user_filters = defaultdict(lambda: {"title": None})
 user_search_active = defaultdict(lambda: False)
 user_seen_items = defaultdict(set)  # loaded from DB
-user_hunter_tasks = {}
-user_modes = defaultdict(lambda: None)  # modes: None, "enter_admin_password", "title", "add_url"
+user_hunter_tasks: dict[int, asyncio.Task] = {}
+user_modes = defaultdict(lambda: None)  # None, "enter_admin_password", "title", "add_url"
 user_started = set()
 user_urls = defaultdict(list)  # loaded from DB: [{"url": str, "enabled": bool, "autobuy": bool}]
 user_api_errors = defaultdict(int)
 
-# load persisted data for user on first interaction (async)
+
 async def load_user_data(user_id: int, force: bool = False):
     if user_id in user_started and not force:
         return
@@ -259,6 +299,7 @@ async def load_user_data(user_id: int, force: bool = False):
     user_seen_items[user_id] = await db_load_seen(user_id)
     user_started.add(user_id)
 
+
 async def get_user_role(user_id: int):
     await load_user_data(user_id)
     role = await db_get_role(user_id)
@@ -266,15 +307,18 @@ async def get_user_role(user_id: int):
         return None
     return role
 
+
 async def set_user_role(user_id: int, role: str):
     await db_set_role(user_id, role)
-    await load_user_data(user_id)
+    await load_user_data(user_id, force=True)
+
 
 async def user_url_limit(user_id: int):
     role = await get_user_role(user_id)
     if role == "limited":
         return MAX_URLS_PER_USER_LIMITED
     return MAX_URLS_PER_USER_DEFAULT
+
 
 async def user_hunter_interval(user_id: int):
     role = await get_user_role(user_id)
@@ -285,6 +329,7 @@ async def user_hunter_interval(user_id: int):
 def format_balance(amount: float) -> str:
     return f"{amount:,.2f} ₽".replace(",", " ")
 
+
 def mini_app_url(user_id: int) -> str | None:
     if not WEBAPP_PUBLIC_URL:
         return None
@@ -293,10 +338,6 @@ def mini_app_url(user_id: int) -> str | None:
         base_url = f"https://{base_url}"
     return f"{base_url}/mini-app?user_id={user_id}"
 
-
-def mini_app_ready() -> bool:
-    url = mini_app_url(1)
-    return bool(url and url.startswith("https://"))
 
 # ---------------------- КЛАВИАТУРА ----------------------
 def main_kb():
@@ -310,8 +351,9 @@ def main_kb():
             [KeyboardButton(text="ℹ️ Помощь")],
             [KeyboardButton(text="🏠 Главное меню")],
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
+
 
 # ---------------------- ТЕКСТЫ ----------------------
 START_INFO = (
@@ -340,17 +382,20 @@ COMMANDS_MENU = (
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 _global_session: aiohttp.ClientSession | None = None
 
+
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         _global_session = aiohttp.ClientSession()
     return _global_session
 
+
 async def close_session():
     global _global_session
     if _global_session:
         await _global_session.close()
         _global_session = None
+
 
 async def fetch_items_raw(url: str):
     headers = {"Authorization": f"Bearer {LZT_API_KEY}"} if LZT_API_KEY else {}
@@ -364,7 +409,7 @@ async def fetch_items_raw(url: str):
                 return None, f"❌ API вернул не JSON:\n{text[:300]}"
             items = data.get("items")
             if not isinstance(items, list):
-                return None, f"⚠ API не вернул список items"
+                return None, "⚠ API не вернул список items"
             return items, None
     except asyncio.TimeoutError:
         return None, "❌ Таймаут запроса"
@@ -372,6 +417,7 @@ async def fetch_items_raw(url: str):
         return None, f"❌ Ошибка сети: {e}"
     except Exception as e:
         return None, f"❌ Ошибка: {e}"
+
 
 async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
     attempt = 0
@@ -383,14 +429,19 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
                 items, err = await fetch_items_raw(url)
         except Exception as e:
             items, err = None, f"❌ Ошибка: {e}"
+
         if err is None:
             return items, None
+
         if attempt >= max_retries:
             return [], err
+
         jitter = random.uniform(0, delay * 0.3)
         await asyncio.sleep(delay + jitter)
         delay *= 2
+
     return [], "❌ Не удалось получить ответ"
+
 
 # ---------------------- ПРОВЕРКА URL ПЕРЕД ДОБАВЛЕНИЕМ ----------------------
 async def validate_url_before_add(url: str):
@@ -403,25 +454,29 @@ async def validate_url_before_add(url: str):
         return False, f"❌ API ошибка: {api_err}"
 
     # Разрешаем добавление даже при пустом items
+    _ = items
     return True, None
+
 
 # ---------------------- ИСТОЧНИКИ ----------------------
 async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
-    # Защита от случайных дубликатов в памяти, если URL уже есть в БД.
+    # защита от случайных дубликатов в памяти
     deduped = []
     seen = set()
     for source in user_urls[user_id]:
         url = source.get("url")
-        if url in seen:
+        if not url or url in seen:
             continue
         seen.add(url)
         deduped.append(source)
     if deduped != user_urls[user_id]:
         user_urls[user_id] = deduped
+
     if enabled_only:
         return [s for s in user_urls[user_id] if s.get("enabled", True)]
     return user_urls[user_id]
+
 
 # ---------------------- ПАРСИНГ ВСЕХ ИСТОЧНИКОВ ----------------------
 async def fetch_all_sources(user_id: int):
@@ -434,6 +489,7 @@ async def fetch_all_sources(user_id: int):
             "idx": idx + 1,
             "url": url,
             "enabled": source.get("enabled", True),
+            "autobuy": source.get("autobuy", False),
             "label": f"URL #{idx+1}",
         }
         items, err = await fetch_with_retry(url)
@@ -444,6 +500,7 @@ async def fetch_all_sources(user_id: int):
             results.append((it, source_info))
     return results, errors
 
+
 # ---------------------- ФИЛЬТРЫ ----------------------
 def passes_filters(item: dict, user_id: int) -> bool:
     f = user_filters[user_id]
@@ -452,6 +509,7 @@ def passes_filters(item: dict, user_id: int) -> bool:
         if f["title"].lower() not in title:
             return False
     return True
+
 
 # ---------------------- ВСПОМОГАТЕЛИ ДЛЯ ОТОБРАЖЕНИЯ ----------------------
 def format_seller(seller):
@@ -478,6 +536,7 @@ def format_seller(seller):
         return " | ".join(parts)
     return str(seller)
 
+
 def make_card(item: dict, source_label: str) -> str:
     title = item.get("title", "Без названия")
     price = item.get("price", "—")
@@ -492,6 +551,7 @@ def make_card(item: dict, source_label: str) -> str:
     seller_raw = item.get("seller") or item.get("user") or item.get("owner") or None
     seller = format_seller(seller_raw)
     created = item.get("created_at") or item.get("date") or item.get("added_at") or None
+
     extra_flags = []
     if item.get("discount") or item.get("sale") or item.get("discount_percent"):
         extra_flags.append("Скидка")
@@ -531,42 +591,53 @@ def make_card(item: dict, source_label: str) -> str:
 
     card = "\n".join(lines)
     if len(card) > SHORT_CARD_MAX:
-        return card[:SHORT_CARD_MAX - 100] + "\n... (обрезано)"
+        return card[: SHORT_CARD_MAX - 100] + "\n... (обрезано)"
     return card
+
 
 def make_kb(item: dict) -> InlineKeyboardMarkup | None:
     iid = item.get("item_id")
     if not iid:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть", url=f"https://lzt.market/{iid}")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=f"https://lzt.market/{iid}")]]
+    )
 
-# ---------------------- ОТЧЁТЫ ОШИБОК ----------------------
-# user_api_errors defined above
 
 # ---------------------- ПРОВЕРКА 10 ЛОТОВ ----------------------
 async def send_compact_10_for_user(user_id: int, chat_id: int):
     items_with_sources, errors = await fetch_all_sources(user_id)
     if errors:
         for url, err in errors:
-            await send_bot_message(chat_id, f"❗ Ошибка {html.escape(url)}:\n{html.escape(str(err))}")
+            await send_bot_message(
+                chat_id,
+                f"❗ Ошибка {html.escape(url)}:\n{html.escape(str(err))}",
+                parse_mode="HTML",
+            )
+
     if not items_with_sources:
         await send_bot_message(chat_id, "❗ Ничего не найдено по всем источникам.")
         return
+
     aggregated = {}
     for item, source in items_with_sources:
         iid = item.get("item_id")
         key = f"id::{iid}" if iid else f"noid::{item.get('title')}_{item.get('price')}"
         if key not in aggregated:
             aggregated[key] = (item, source)
+
     items_list = list(aggregated.values())
     limited = items_list[:10]
+
     await send_bot_message(
         chat_id,
-        f"✅ Проверка работоспособности\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>\n🔍 Активных источников: {len(await get_all_sources(user_id, enabled_only=True))} URL",
-        parse_mode="HTML"
+        f"✅ Проверка работоспособности\n"
+        f"📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n"
+        f"📦 Показано: <b>{len(limited)}</b>\n"
+        f"🔍 Активных источников: {len(await get_all_sources(user_id, enabled_only=True))} URL",
+        parse_mode="HTML",
     )
+
     for item, source in limited:
         if not passes_filters(item, user_id):
             continue
@@ -578,14 +649,19 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
             await send_bot_message(chat_id, card)
         await asyncio.sleep(0.2)
 
+
 # ---------------------- ТЕСТ КОНКРЕТНОГО URL ----------------------
 async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: str):
     items, err = await fetch_with_retry(url, max_retries=2)
     if err:
-        await send_bot_message(chat_id, f"❗ Ошибка {html.escape(label)} ({html.escape(url)}):\n{html.escape(str(err))}")
+        await send_bot_message(
+            chat_id,
+            f"❗ Ошибка {html.escape(label)} ({html.escape(url)}):\n{html.escape(str(err))}",
+            parse_mode="HTML",
+        )
         return
     if not items:
-        await send_bot_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.")
+        await send_bot_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.", parse_mode="HTML")
         return
 
     try:
@@ -606,13 +682,18 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         key = f"id::{iid}" if iid else f"noid::{item.get('title')}_{item.get('price')}"
         if key not in aggregated:
             aggregated[key] = item
+
     items_list = list(aggregated.values())
     limited = items_list[:10]
+
     await send_bot_message(
         chat_id,
-        f"✅ Тест URL ({html.escape(label)})\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>",
-        parse_mode="HTML"
+        f"✅ Тест URL ({html.escape(label)})\n"
+        f"📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n"
+        f"📦 Показано: <b>{len(limited)}</b>",
+        parse_mode="HTML",
     )
+
     for item in limited:
         if not passes_filters(item, user_id):
             continue
@@ -624,20 +705,24 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
             await send_bot_message(chat_id, card)
         await asyncio.sleep(0.2)
 
+
+# ---------------------- АВТОПОКУПКА (ОТКЛЮЧЕНА В UI, НО КОД ИСПРАВЛЕН) ----------------------
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
-    payload = {}
+    payload: dict = {}
     if price is not None:
         payload.update({"price": price, "item_price": price, "amount": price})
 
     if LZT_SECRET_WORD:
-        payload.update({
-            "secret_answer": LZT_SECRET_WORD,
-            "secret_word": LZT_SECRET_WORD,
-            "secretWord": LZT_SECRET_WORD,
-            "qa_answer": LZT_SECRET_WORD,
-            "answer": LZT_SECRET_WORD,
-        })
+        payload.update(
+            {
+                "secret_answer": LZT_SECRET_WORD,
+                "secret_word": LZT_SECRET_WORD,
+                "secretWord": LZT_SECRET_WORD,
+                "qa_answer": LZT_SECRET_WORD,
+                "answer": LZT_SECRET_WORD,
+            }
+        )
 
     variants = [
         payload,
@@ -701,34 +786,45 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
     seen = set()
     for base in dedup_bases:
         for tpl in paths:
-            url = f"{base}/{tpl.format(id=item_id)}"
-            if url in seen:
+            u = f"{base}/{tpl.format(id=item_id)}"
+            if u in seen:
                 continue
-            seen.add(url)
-            urls.append(url)
+            seen.add(u)
+            urls.append(u)
     return urls
 
 
 def _autobuy_classify_response(status: int, text: str):
+    """
+    Возвращает (state, info):
+      - success: покупка прошла
+      - auth: проблемы с ключом/правами
+      - secret: нужен/неверный ответ на секретный вопрос
+      - terminal: лот уже куплен/продан/недостаточно средств и т.п. (останавливаем)
+      - retry: пробуем следующий endpoint/вариант payload
+    """
     text = html.unescape(text or "")
     lower = text.lower()
 
-    success_markers = (
-        "success", "ok", "purchased", "purchase complete", "already bought", "уже куп"
-    )
+    success_markers = ("success", "ok", "purchased", "purchase complete", "already bought", "уже куп")
     terminal_error_markers = (
-        "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
-        "already purchased", "already bought", "цена изменилась", "нельзя купить",
-        "forbidden", "access denied"
+        "insufficient",
+        "not enough",
+        "недостаточно",
+        "уже продан",
+        "already sold",
+        "already purchased",
+        "already bought",
+        "цена изменилась",
+        "нельзя купить",
+        "forbidden",
+        "access denied",
     )
 
-    # 404/405 по неверному пути покупки не должны останавливать весь автобай:
-    # продолжаем перебор следующих endpoint'ов.
+    # 404/405 по неверному пути покупки не должны останавливать весь автобай
     if status in (404, 405):
         return "retry", text[:220]
-        "forbidden", "access denied", "не найден", "не найдена", "not found"
 
- main
     if status in (200, 201, 202):
         return "success", text[:220]
     if status in (401, 403):
@@ -739,6 +835,7 @@ def _autobuy_classify_response(status: int, text: str):
         return "success", text[:220]
     if any(marker in lower for marker in terminal_error_markers):
         return "terminal", text[:220]
+
     return "retry", text[:220]
 
 
@@ -769,7 +866,10 @@ async def try_autobuy_item(source: dict, item: dict):
         session = await get_session()
         for buy_url in buy_urls:
             for payload in payload_variants:
-                async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
+                # JSON
+                async with session.post(
+                    buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT
+                ) as resp:
                     body = await resp.text()
                     state, info = _autobuy_classify_response(resp.status, body)
                     if state == "success":
@@ -783,8 +883,11 @@ async def try_autobuy_item(source: dict, item: dict):
                         return False, f"{buy_url} -> {info}"
                     last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
 
+                # form (на всякий случай)
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-                async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
+                async with session.post(
+                    buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT
+                ) as form_resp:
                     form_body = await form_resp.text()
                     state, info = _autobuy_classify_response(form_resp.status, form_body)
                     if state == "success":
@@ -802,10 +905,11 @@ async def try_autobuy_item(source: dict, item: dict):
     except Exception as e:
         return False, str(e)
 
-        main
+
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
+    # первичная "засветка"
     try:
         items_with_sources, _ = await fetch_all_sources(user_id)
         for it, _source in items_with_sources:
@@ -833,19 +937,27 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 key = f"id::{iid}" if iid else f"noid::{item.get('title')}_{item.get('price')}"
                 if key in user_seen_items[user_id]:
                     continue
+
+                # если не проходит фильтр — помечаем как seen, но не показываем
                 if not passes_filters(item, user_id):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
 
+                # автобай (в UI он выключен, но логика рабочая)
                 if source.get("autobuy", False):
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
-                        await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
+                        await send_bot_message(
+                            chat_id,
+                            f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}",
+                        )
                     else:
-                        await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
+                        await send_bot_message(
+                            chat_id,
+                            f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}",
+                        )
 
-         main
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
 
@@ -856,7 +968,9 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 except Exception:
                     await send_bot_message(chat_id, card)
                 await asyncio.sleep(0.2)
+
             await asyncio.sleep(await user_hunter_interval(user_id))
+
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -867,6 +981,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             except Exception:
                 pass
             await asyncio.sleep(await user_hunter_interval(user_id))
+
 
 # ---------------------- ОТЧЁТ ОШИБОК (ФОН) ----------------------
 async def error_reporter_loop():
@@ -880,7 +995,11 @@ async def error_reporter_loop():
                 last = await db_get_last_report(uid)
                 if count and (now - last >= ERROR_REPORT_INTERVAL):
                     try:
-                        await send_bot_message(uid, f"⚠️ За последний час API не вернул список items или произошли ошибки: <b>{count}</b> раз.", parse_mode="HTML")
+                        await send_bot_message(
+                            uid,
+                            f"⚠️ За последний час API не вернул список items или произошли ошибки: <b>{count}</b> раз.",
+                            parse_mode="HTML",
+                        )
                     except Exception:
                         pass
                     user_api_errors[uid] = 0
@@ -893,6 +1012,7 @@ async def error_reporter_loop():
                 pass
             await asyncio.sleep(ERROR_REPORT_INTERVAL)
 
+
 # ---------------------- START / STATUS / CALLBACKS / HANDLERS ----------------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -902,14 +1022,17 @@ async def start_cmd(message: types.Message):
     balance = await db_get_balance(user_id)
     await message.answer(COMMANDS_MENU, parse_mode="HTML", reply_markup=main_kb())
     await message.answer(f"💎 Ваш баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML")
+
     access_rows = []
     app_link = mini_app_url(user_id)
     if app_link:
         access_rows.append([InlineKeyboardButton(text="🪄 Открыть Mini App", web_app=WebAppInfo(url=app_link))])
-    access_rows.extend([
-        [InlineKeyboardButton(text="🔐 Ввести пароль (админ)", callback_data="enter_pass")],
-        [InlineKeyboardButton(text="👤 У меня нет пароля", callback_data="no_pass")]
-    ])
+    access_rows.extend(
+        [
+            [InlineKeyboardButton(text="🔐 Ввести пароль (админ)", callback_data="enter_pass")],
+            [InlineKeyboardButton(text="👤 У меня нет пароля", callback_data="no_pass")],
+        ]
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=access_rows)
     access_hint = ""
     if not app_link:
@@ -923,6 +1046,7 @@ async def start_cmd(message: types.Message):
         reply_markup=kb,
     )
     await safe_delete(message)
+
 
 @dp.callback_query()
 async def handle_callbacks(call: types.CallbackQuery):
@@ -952,7 +1076,10 @@ async def handle_callbacks(call: types.CallbackQuery):
             await call.answer("Некорректная сумма", show_alert=True)
             return
         balance = await db_change_balance(user_id, amount)
-        await call.message.answer(f"✅ Баланс пополнен на {format_balance(amount)}\n💎 Текущий баланс: <b>{format_balance(balance)}</b>", parse_mode="HTML")
+        await call.message.answer(
+            f"✅ Баланс пополнен на {format_balance(amount)}\n💎 Текущий баланс: <b>{format_balance(balance)}</b>",
+            parse_mode="HTML",
+        )
         await call.answer("Баланс пополнен")
         return
 
@@ -971,7 +1098,6 @@ async def handle_callbacks(call: types.CallbackQuery):
             return
         await call.answer("Некорректный индекс URL", show_alert=True)
         return
-
 
     if data.startswith("togurl:"):
         try:
@@ -1020,6 +1146,7 @@ async def handle_callbacks(call: types.CallbackQuery):
 
     await call.answer()
 
+
 @dp.message(Command("status"))
 async def status_cmd(message: types.Message):
     user_id = message.from_user.id
@@ -1040,25 +1167,30 @@ async def status_cmd(message: types.Message):
     await message.answer("\n".join(lines), parse_mode="HTML")
     await safe_delete(message)
 
+
 def build_urls_list_kb_sync(sources: list) -> InlineKeyboardMarkup:
     rows = []
     for idx, source in enumerate(sources):
         url = source["url"]
         enabled = source.get("enabled", True)
-        label = url if len(url) <= URL_LABEL_MAX else url[:URL_LABEL_MAX-3] + "..."
+        label = url if len(url) <= URL_LABEL_MAX else url[: URL_LABEL_MAX - 3] + "..."
         state = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
         rows.append([InlineKeyboardButton(text=f"🔗 URL #{idx+1} ({state}): {label}", callback_data="noop")])
-        rows.append([
-            InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
-            InlineKeyboardButton(text=f"🔁 {'Выключить' if enabled else 'Включить'}", callback_data=f"togurl:{idx}"),
-            InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}")
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"✅ Проверка #{idx+1}", callback_data=f"testurl:{idx}"),
+                InlineKeyboardButton(text=f"🔁 {'Выключить' if enabled else 'Включить'}", callback_data=f"togurl:{idx}"),
+                InlineKeyboardButton(text=f"🗑 Удалить #{idx+1}", callback_data=f"delurl:{idx}"),
+            ]
+        )
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 async def build_urls_list_kb(user_id: int) -> InlineKeyboardMarkup:
     urls = await get_all_sources(user_id)
     return build_urls_list_kb_sync(urls)
+
 
 @dp.message()
 async def buttons_handler(message: types.Message):
@@ -1075,7 +1207,9 @@ async def buttons_handler(message: types.Message):
                 await set_user_role(user_id, "admin")
                 await message.answer("✔ Пароль верный. Роль администратора активирована.")
             else:
-                await message.answer("❌ Неверный пароль. Если пароля нет — нажмите '👤 У меня нет пароля' в стартовом сообщении.")
+                await message.answer(
+                    "❌ Неверный пароль. Если пароля нет — нажмите '👤 У меня нет пароля' в стартовом сообщении."
+                )
             return await safe_delete(message)
 
         if mode == "title":
@@ -1157,7 +1291,6 @@ async def buttons_handler(message: types.Message):
         if text == "⚙️ Автобай":
             return await message.answer("⚠️ Автобай отключён. Используйте мониторинг и ручную покупку.")
 
-
         if text == "ℹ️ Помощь":
             return await message.answer(
                 "<b>ℹ️ Быстрый гид</b>\n"
@@ -1188,7 +1321,9 @@ async def buttons_handler(message: types.Message):
             app_link = mini_app_url(user_id)
             if not app_link:
                 return await message.answer("⚠ Mini App пока недоступен. Укажите WEBAPP_PUBLIC_URL (https://...) и перезапустите бота.")
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=app_link))]] )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=app_link))]]
+            )
             return await message.answer("🪄 Откройте мини-приложение кнопкой ниже", reply_markup=kb)
 
         if text == "🏠 Главное меню":
@@ -1202,11 +1337,13 @@ async def buttons_handler(message: types.Message):
         await send_bot_message(chat_id, f"❌ Ошибка в обработке: {html.escape(str(e))}")
         await safe_delete(message)
 
+
 async def safe_delete(message: types.Message):
     try:
         await message.delete()
     except Exception:
         pass
+
 
 async def short_status_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
@@ -1215,10 +1352,17 @@ async def short_status_for_user(user_id: int, chat_id: int):
     total = len(await get_all_sources(user_id))
     enabled = len(await get_all_sources(user_id, enabled_only=True))
     balance = await db_get_balance(user_id)
-    await send_bot_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+    await send_bot_message(
+        chat_id,
+        f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | "
+        f"Источников: {enabled}/{total} | "
+        f"Увидено: {seen} | "
+        f"Баланс: {format_balance(balance)} | "
+        f"Ошибок API: {user_api_errors.get(user_id, 0)}",
+    )
 
 
-
+# ---------------------- MINI APP ----------------------
 def render_mini_app_html(user_id: int, balance: float) -> str:
     return f"""<!doctype html>
 <html lang="ru">
@@ -1231,7 +1375,7 @@ def render_mini_app_html(user_id: int, balance: float) -> str:
     .card {{ max-width:420px; margin:24px auto; background:rgba(30,41,59,.85); border:1px solid #334155; border-radius:18px; padding:20px; box-shadow:0 20px 40px rgba(0,0,0,.35); }}
     .balance {{ font-size:32px; font-weight:700; margin:8px 0 16px; }}
     .btns {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
-    button {{ border:none; border-radius:12px; padding:12px; font-weight:600; color:#fff; background:linear-gradient(135deg,#22c55e,#16a34a); }}
+    button {{ border:none; border-radius:12px; padding:12px; font-weight:600; color:#fff; background:linear-gradient(135deg,#22c55e,#16a34a); cursor:pointer; }}
     .muted {{ color:#94a3b8; font-size:13px; }}
   </style>
 </head>
@@ -1250,14 +1394,21 @@ def render_mini_app_html(user_id: int, balance: float) -> str:
   </div>
 <script>
 async function topUp(amount) {{
-  const res = await fetch('/mini-app/topup', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{user_id:{user_id}, amount}})}});
+  const res = await fetch('/mini-app/topup', {{
+    method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{user_id:{user_id}, amount}})
+  }});
   const data = await res.json();
-  document.getElementById('balance').textContent = data.balance;
+  if (data && data.balance) {{
+    document.getElementById('balance').textContent = data.balance;
+  }}
 }}
 </script>
 </body>
 </html>
 """
+
 
 async def mini_app_page(request: web.Request):
     try:
@@ -1270,6 +1421,7 @@ async def mini_app_page(request: web.Request):
     balance = await db_get_balance(user_id)
     return web.Response(text=render_mini_app_html(user_id, balance), content_type="text/html")
 
+
 async def mini_app_topup(request: web.Request):
     data = await request.json()
     user_id = int(data.get("user_id", 0))
@@ -1279,15 +1431,17 @@ async def mini_app_topup(request: web.Request):
     balance = await db_change_balance(user_id, amount)
     return web.json_response({"ok": True, "balance": format_balance(balance)})
 
+
 async def start_mini_app_server():
     app = web.Application()
-    app.router.add_get('/mini-app', mini_app_page)
-    app.router.add_post('/mini-app/topup', mini_app_topup)
+    app.router.add_get("/mini-app", mini_app_page)
+    app.router.add_post("/mini-app/topup", mini_app_topup)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, WEBAPP_HOST, WEBAPP_PORT)
     await site.start()
     return runner
+
 
 # ---------------------- RUN ----------------------
 async def main():
@@ -1300,12 +1454,14 @@ async def main():
         bot = Bot(token=API_TOKEN)
 
     await init_db()
-    # start background reporter
+
     web_runner = await start_mini_app_server()
+
     try:
         asyncio.create_task(error_reporter_loop())
     except Exception:
         pass
+
     try:
         await dp.start_polling(bot)
     finally:
@@ -1313,6 +1469,7 @@ async def main():
         if bot is not None and getattr(bot, "session", None) is not None and not bot.session.closed:
             await bot.session.close()
         await web_runner.cleanup()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
