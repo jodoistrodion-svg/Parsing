@@ -725,9 +725,17 @@ def _autobuy_classify_response(status: int, text: str):
     terminal_error_markers = (
         "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
+        "forbidden", "access denied"
+    )
+
+    # 404/405 по неверному пути покупки не должны останавливать весь автобай:
+    # продолжаем перебор следующих endpoint'ов.
+    if status in (404, 405):
+        return "retry", text[:220]
         "forbidden", "access denied", "не найден", "не найдена", "not found"
     )
 
+ main
     if status in (200, 201, 202):
         return "success", text[:220]
     if status in (401, 403):
@@ -835,9 +843,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
-                user_seen_items[user_id].add(key)
-                await db_mark_seen(user_id, key)
-
                 if source.get("autobuy", False):
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
@@ -845,6 +850,8 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     else:
                         await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
 
+                user_seen_items[user_id].add(key)
+                await db_mark_seen(user_id, key)
 
                 card = make_card(item, source["label"])
                 kb = make_kb(item)
