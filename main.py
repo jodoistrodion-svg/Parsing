@@ -23,7 +23,7 @@ from aiohttp import web
 
 from config import API_TOKEN, LZT_API_KEY
 
-bot = Bot(token=API_TOKEN)
+bot = None
 dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
@@ -50,6 +50,18 @@ WEBAPP_PUBLIC_URL = (
     or os.getenv("RAILWAY_PUBLIC_DOMAIN")
     or ""
 ).rstrip("/")
+
+
+def has_valid_telegram_token(token: str) -> bool:
+    if not token:
+        return False
+    return bool(re.match(r"^\d{6,12}:[A-Za-z0-9_-]{20,}$", token))
+
+
+async def send_bot_message(chat_id: int, text: str, **kwargs):
+    if bot is None:
+        raise RuntimeError("Bot не инициализирован")
+    return await bot.send_message(chat_id, text, **kwargs)
 
 # ---------------------- АИО-SQLITE (асинхронная БД) ----------------------
 async def init_db():
@@ -544,9 +556,9 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
     items_with_sources, errors = await fetch_all_sources(user_id)
     if errors:
         for url, err in errors:
-            await bot.send_message(chat_id, f"❗ Ошибка {html.escape(url)}:\n{html.escape(str(err))}")
+            await send_bot_message(chat_id, f"❗ Ошибка {html.escape(url)}:\n{html.escape(str(err))}")
     if not items_with_sources:
-        await bot.send_message(chat_id, "❗ Ничего не найдено по всем источникам.")
+        await send_bot_message(chat_id, "❗ Ничего не найдено по всем источникам.")
         return
     aggregated = {}
     for item, source in items_with_sources:
@@ -556,7 +568,7 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
             aggregated[key] = (item, source)
     items_list = list(aggregated.values())
     limited = items_list[:10]
-    await bot.send_message(
+    await send_bot_message(
         chat_id,
         f"✅ Проверка работоспособности\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>\n🔍 Активных источников: {len(await get_all_sources(user_id, enabled_only=True))} URL",
         parse_mode="HTML"
@@ -567,24 +579,24 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
         card = make_card(item, source["label"])
         kb = make_kb(item)
         try:
-            await bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await send_bot_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
         except Exception:
-            await bot.send_message(chat_id, card)
+            await send_bot_message(chat_id, card)
         await asyncio.sleep(0.2)
 
 # ---------------------- ТЕСТ КОНКРЕТНОГО URL ----------------------
 async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: str):
     items, err = await fetch_with_retry(url, max_retries=2)
     if err:
-        await bot.send_message(chat_id, f"❗ Ошибка {html.escape(label)} ({html.escape(url)}):\n{html.escape(str(err))}")
+        await send_bot_message(chat_id, f"❗ Ошибка {html.escape(label)} ({html.escape(url)}):\n{html.escape(str(err))}")
         return
     if not items:
-        await bot.send_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.")
+        await send_bot_message(chat_id, f"❗ {html.escape(label)}: ничего не найдено.")
         return
 
     try:
         keys = list(items[0].keys())
-        await bot.send_message(chat_id, f"🔍 Пример полей в первом лоте: {', '.join(keys)}")
+        await send_bot_message(chat_id, f"🔍 Пример полей в первом лоте: {', '.join(keys)}")
     except Exception:
         pass
 
@@ -602,7 +614,7 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
             aggregated[key] = item
     items_list = list(aggregated.values())
     limited = items_list[:10]
-    await bot.send_message(
+    await send_bot_message(
         chat_id,
         f"✅ Тест URL ({html.escape(label)})\n📦 Уникальных лотов всего: <b>{len(items_list)}</b>\n📦 Показано: <b>{len(limited)}</b>",
         parse_mode="HTML"
@@ -613,9 +625,9 @@ async def send_test_for_single_url(user_id: int, chat_id: int, url: str, label: 
         card = make_card(item, label)
         kb = make_kb(item)
         try:
-            await bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await send_bot_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
         except Exception:
-            await bot.send_message(chat_id, card)
+            await send_bot_message(chat_id, card)
         await asyncio.sleep(0.2)
 
 async def try_autobuy_item(source: dict, item: dict):
@@ -771,9 +783,9 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             if _source.get("autobuy", False):
                 bought, buy_info = await try_autobuy_item(_source, it)
                 if bought:
-                    await bot.send_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
+                    await send_bot_message(chat_id, f"🛒 Автопокупка успешна (при запуске): {_source['label']} | item_id={it.get('item_id')}")
                 else:
-                    await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена (при запуске): {_source['label']} | item_id={it.get('item_id')} | {str(buy_info)}")
+
 
             user_seen_items[user_id].add(key)
             await db_mark_seen(user_id, key)
@@ -807,16 +819,16 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if source.get("autobuy", False):
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
-                        await bot.send_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
+                        await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
                     else:
-                        await bot.send_message(chat_id, f"⚠️ Автопокупка не выполнена: {source['label']} | item_id={item.get('item_id')} | {str(buy_info)}")
+
 
                 card = make_card(item, source["label"])
                 kb = make_kb(item)
                 try:
-                    await bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                    await send_bot_message(chat_id, card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
                 except Exception:
-                    await bot.send_message(chat_id, card)
+                    await send_bot_message(chat_id, card)
                 await asyncio.sleep(0.2)
             await asyncio.sleep(await user_hunter_interval(user_id))
         except asyncio.CancelledError:
@@ -842,7 +854,7 @@ async def error_reporter_loop():
                 last = await db_get_last_report(uid)
                 if count and (now - last >= ERROR_REPORT_INTERVAL):
                     try:
-                        await bot.send_message(uid, f"⚠️ За последний час API не вернул список items или произошли ошибки: <b>{count}</b> раз.", parse_mode="HTML")
+                        await send_bot_message(uid, f"⚠️ За последний час API не вернул список items или произошли ошибки: <b>{count}</b> раз.", parse_mode="HTML")
                     except Exception:
                         pass
                     user_api_errors[uid] = 0
@@ -1188,7 +1200,7 @@ async def buttons_handler(message: types.Message):
             await safe_delete(message)
 
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ Ошибка в обработке: {html.escape(str(e))}")
+        await send_bot_message(chat_id, f"❌ Ошибка в обработке: {html.escape(str(e))}")
         await safe_delete(message)
 
 async def safe_delete(message: types.Message):
@@ -1205,7 +1217,7 @@ async def short_status_for_user(user_id: int, chat_id: int):
     enabled = len(await get_all_sources(user_id, enabled_only=True))
     autobuy = len(await get_autobuy_sources(user_id))
     balance = await db_get_balance(user_id)
-    await bot.send_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
+    await send_bot_message(chat_id, f"🔹 Охотник: {'ВКЛ' if active else 'ВЫКЛ'} | Источников: {enabled}/{total} | Автобай: {autobuy} | Увидено: {seen} | Баланс: {format_balance(balance)} | Ошибок API: {user_api_errors.get(user_id, 0)}")
 
 
 
@@ -1281,11 +1293,9 @@ async def start_mini_app_server():
 
 # ---------------------- RUN ----------------------
 async def main():
+    global bot
     print("[BOT] Запуск бота: multiuser, persistent seen (aiosqlite), exponential backoff, per-user limits, admin password flow...")
-    if not API_TOKEN:
-        raise RuntimeError("API_TOKEN не задан. Укажите переменную окружения API_TOKEN")
-    if not LZT_API_KEY:
-        print("[BOT] Внимание: LZT_API_KEY не задан. Мониторинг будет работать, автобай отключен.")
+
     await init_db()
     # start background reporter
     web_runner = await start_mini_app_server()
@@ -1297,6 +1307,8 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await close_session()
+        if bot is not None:
+            await bot.session.close()
         await web_runner.cleanup()
 
 if __name__ == "__main__":
