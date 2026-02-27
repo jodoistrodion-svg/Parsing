@@ -39,7 +39,6 @@ RETRY_MAX = 4
 RETRY_BASE_DELAY = 1.0  # seconds
 ADMIN_PASSWORD = "1303"
 LIMITED_EXTRA_DELAY = 3.0  # seconds added for limited users
-AUTOBUY_RETRY_DELAY = 20  # seconds between retry attempts for same lot
 DB_FILE = "bot_data.sqlite"
 WEBAPP_HOST = "0.0.0.0"
 WEBAPP_PORT = 8080
@@ -250,8 +249,6 @@ user_modes = defaultdict(lambda: None)  # modes: None, "enter_admin_password", "
 user_started = set()
 user_urls = defaultdict(list)  # loaded from DB: [{"url": str, "enabled": bool, "autobuy": bool}]
 user_api_errors = defaultdict(int)
-autobuy_retry_state = defaultdict(dict)  # user_id -> {item_key: last_attempt_ts}
-autobuy_announced_items = defaultdict(set)  # user_id -> {item_key} for non-terminal retry flow
 
 # load persisted data for user on first interaction (async)
 async def load_user_data(user_id: int, force: bool = False):
@@ -750,16 +747,16 @@ def _autobuy_classify_response(status: int, text: str):
 
 async def try_autobuy_item(source: dict, item: dict):
     if not LZT_API_KEY:
-        return False, "LZT_API_KEY не задан", True
+        return False, "LZT_API_KEY не задан"
 
     item_id = item.get("item_id") or item.get("id")
     if not item_id:
-        return False, "missing_item_id", True
+        return False, "missing_item_id"
 
     try:
         item_id = int(item_id)
     except (TypeError, ValueError):
-        return False, f"invalid_item_id={item_id}", True
+        return False, f"invalid_item_id={item_id}"
 
     headers = {
         "Authorization": f"Bearer {LZT_API_KEY}",
@@ -787,13 +784,13 @@ async def try_autobuy_item(source: dict, item: dict):
                     except Exception:
                         state, info = _autobuy_classify_response(resp.status, body)
                     if state == "success":
-                        return True, f"{buy_url} -> {info}", True
+                        return True, f"{buy_url} -> {info}"
                     if state == "auth":
-                        return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})", True
+                        return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
-                        return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})", True
+                        return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
                     if state == "terminal":
-                        return False, f"{buy_url} -> {info}", True
+                        return False, f"{buy_url} -> {info}"
                     last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
 
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
@@ -809,18 +806,18 @@ async def try_autobuy_item(source: dict, item: dict):
                     except Exception:
                         state, info = _autobuy_classify_response(form_resp.status, form_body)
                     if state == "success":
-                        return True, f"{buy_url} (form) -> {info}", True
+                        return True, f"{buy_url} (form) -> {info}"
                     if state == "auth":
-                        return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})", True
+                        return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
-                        return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})", True
+                        return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
                     if state == "terminal":
-                        return False, f"{buy_url} (form) -> {info}", True
+                        return False, f"{buy_url} (form) -> {info}"
                     last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
 
-        return False, last_err, False
+        return False, last_err
     except Exception as e:
-        return False, str(e), False
+        return False, str(e)
 
 # ---------------------- ОХОТНИК ----------------------
 async def hunter_loop_for_user(user_id: int, chat_id: int):
@@ -856,36 +853,15 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     user_seen_items[user_id].add(key)
                     await db_mark_seen(user_id, key)
                     continue
-                should_mark_seen = True
-                should_send_card = True
                 if source.get("autobuy", False):
-                    now_ts = int(time.time())
-                    last_attempt = autobuy_retry_state[user_id].get(key, 0)
-                    if now_ts - last_attempt >= AUTOBUY_RETRY_DELAY:
-                        autobuy_retry_state[user_id][key] = now_ts
-                        bought, buy_info, is_terminal = await try_autobuy_item(source, item)
-                        if bought:
-                            autobuy_announced_items[user_id].discard(key)
-                            await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
-                        elif is_terminal:
-                            autobuy_announced_items[user_id].discard(key)
-                            await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
-                        else:
-                            should_mark_seen = False
-                            should_send_card = key not in autobuy_announced_items[user_id]
-                            autobuy_announced_items[user_id].add(key)
+                    bought, buy_info = await try_autobuy_item(source, item)
+                    if bought:
+                        await send_bot_message(chat_id, f"🛒 Автопокупка успешна: {source['label']} | item_id={item.get('item_id')}")
                     else:
-                        should_mark_seen = False
-                        should_send_card = False
+                        await send_bot_message(chat_id, f"⚠️ Автопокупка не удалась: {source['label']} | {buy_info}")
 
-                if should_mark_seen:
-                    autobuy_retry_state[user_id].pop(key, None)
-                    autobuy_announced_items[user_id].discard(key)
-                    user_seen_items[user_id].add(key)
-                    await db_mark_seen(user_id, key)
-
-                if not should_send_card:
-                    continue
+                user_seen_items[user_id].add(key)
+                await db_mark_seen(user_id, key)
 
                 card = make_card(item, source["label"])
                 kb = make_kb(item)
