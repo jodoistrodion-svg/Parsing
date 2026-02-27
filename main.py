@@ -732,6 +732,10 @@ def _autobuy_classify_response(status: int, text: str):
     # продолжаем перебор следующих endpoint'ов.
     if status in (404, 405):
         return "retry", text[:220]
+        "forbidden", "access denied", "не найден", "не найдена", "not found"
+    )
+
+ main
     if status in (200, 201, 202):
         return "success", text[:220]
     if status in (401, 403):
