@@ -728,9 +728,13 @@ def _autobuy_classify_response(status: int, text: str):
     terminal_error_markers = (
         "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
-        "forbidden", "access denied", "не найден", "не найдена", "not found"
+        "forbidden", "access denied"
     )
 
+    # 404/405 по неверному пути покупки не должны останавливать весь автобай:
+    # продолжаем перебор следующих endpoint'ов.
+    if status in (404, 405):
+        return "retry", text[:220]
     if status in (200, 201, 202):
         return "success", text[:220]
     if status in (401, 403):
@@ -773,7 +777,15 @@ async def try_autobuy_item(source: dict, item: dict):
             for payload in payload_variants:
                 async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
                     body = await resp.text()
-                    state, info = _autobuy_classify_response(resp.status, body)
+                    try:
+                        raw = json.loads(body)
+                        if isinstance(raw, dict):
+                            data_blob = json.dumps(raw, ensure_ascii=False)
+                            state, info = _autobuy_classify_response(resp.status, data_blob)
+                        else:
+                            state, info = _autobuy_classify_response(resp.status, body)
+                    except Exception:
+                        state, info = _autobuy_classify_response(resp.status, body)
                     if state == "success":
                         return True, f"{buy_url} -> {info}", True
                     if state == "auth":
@@ -787,7 +799,15 @@ async def try_autobuy_item(source: dict, item: dict):
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
                 async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
                     form_body = await form_resp.text()
-                    state, info = _autobuy_classify_response(form_resp.status, form_body)
+                    try:
+                        raw = json.loads(form_body)
+                        if isinstance(raw, dict):
+                            data_blob = json.dumps(raw, ensure_ascii=False)
+                            state, info = _autobuy_classify_response(form_resp.status, data_blob)
+                        else:
+                            state, info = _autobuy_classify_response(form_resp.status, form_body)
+                    except Exception:
+                        state, info = _autobuy_classify_response(form_resp.status, form_body)
                     if state == "success":
                         return True, f"{buy_url} (form) -> {info}", True
                     if state == "auth":
