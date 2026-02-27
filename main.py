@@ -774,21 +774,14 @@ async def try_autobuy_item(source: dict, item: dict):
             for payload in payload_variants:
                 async with session.post(buy_url, headers=headers, json=payload, timeout=FETCH_TIMEOUT) as resp:
                     body = await resp.text()
-                    try:
-                        raw = json.loads(body)
-                        if isinstance(raw, dict):
-                            data_blob = json.dumps(raw, ensure_ascii=False)
-                            state, info = _autobuy_classify_response(resp.status, data_blob)
-                        else:
-                            state, info = _autobuy_classify_response(resp.status, body)
-                    except Exception:
-                        state, info = _autobuy_classify_response(resp.status, body)
+                    state, info = _autobuy_classify_response(resp.status, body)
                     if state == "success":
                         return True, f"{buy_url} -> {info}"
                     if state == "auth":
                         return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
-                        return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                        last_err = f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                        continue
                     if state == "terminal":
                         return False, f"{buy_url} -> {info}"
                     last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
@@ -796,21 +789,14 @@ async def try_autobuy_item(source: dict, item: dict):
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
                 async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
                     form_body = await form_resp.text()
-                    try:
-                        raw = json.loads(form_body)
-                        if isinstance(raw, dict):
-                            data_blob = json.dumps(raw, ensure_ascii=False)
-                            state, info = _autobuy_classify_response(form_resp.status, data_blob)
-                        else:
-                            state, info = _autobuy_classify_response(form_resp.status, form_body)
-                    except Exception:
-                        state, info = _autobuy_classify_response(form_resp.status, form_body)
+                    state, info = _autobuy_classify_response(form_resp.status, form_body)
                     if state == "success":
                         return True, f"{buy_url} (form) -> {info}"
                     if state == "auth":
                         return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
                     if state == "secret":
-                        return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
+                        last_err = f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
+                        continue
                     if state == "terminal":
                         return False, f"{buy_url} (form) -> {info}"
                     last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
