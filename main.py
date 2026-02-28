@@ -14,7 +14,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# config.py как у тебя. Env-поддержка НЕ ломает старое: если env нет — берётся из config.py
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
 
 API_TOKEN = os.getenv("API_TOKEN") or _API_TOKEN
@@ -24,7 +23,7 @@ bot: Bot | None = None
 dp = Dispatcher()
 
 # ---------------------- НАСТРОЙКИ ----------------------
-HUNTER_INTERVAL_BASE = 1.0
+HUNTER_INTERVAL_BASE = 0.6  # было 1.0 -> ускорили
 SHORT_CARD_MAX = 950
 ERROR_REPORT_INTERVAL = 3600
 
@@ -43,7 +42,10 @@ DB_FILE = "bot_data.sqlite"
 
 LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
 
-# ---------------------- START MESSAGES (как просил) ----------------------
+# Пагинация URL кнопок
+URL_PAGE_SIZE = 12  # 12 URL на страницу (6 рядов по 2 кнопки)
+
+# ---------------------- START MESSAGES ----------------------
 START_MSG_1 = (
     "🤖 Parsing Bot 🤖\n"
     "😶‍🌫️Отслеживание новых лотов по вашим URL в один клик😶‍🌫️\n\n"
@@ -73,7 +75,7 @@ def kb_main() -> ReplyKeyboardMarkup:
     )
 
 
-def kb_urls() -> ReplyKeyboardMarkup:
+def kb_urls_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📄 Список URL"), KeyboardButton(text="➕ Добавить URL")],
@@ -112,34 +114,48 @@ def make_item_key(item: dict) -> str:
     return f"noid::{item.get('title')}_{item.get('price')}"
 
 
+def parse_index_from_button(text: str) -> int | None:
+    """
+    Кнопки URL идут в формате: "1) Название"
+    """
+    m = re.match(r"^\s*(\d+)\)", text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
 # ---------------------- ПАМЯТЬ (по юзеру) ----------------------
 user_filters = defaultdict(lambda: {"title": None})
 user_search_active = defaultdict(lambda: False)
 
-user_seen_items = defaultdict(set)         # из БД
-user_buy_attempted = defaultdict(set)      # из БД
+user_seen_items = defaultdict(set)
+user_buy_attempted = defaultdict(set)
 
 user_hunter_tasks: dict[int, asyncio.Task] = {}
+
 # modes:
 # None
 # add_url_url -> add_url_name
-# del_url
-# tog_url
-# ab_url
-# test_url
-# rename_url_idx -> rename_url_name
+# pick_* (выбор URL кнопкой): pick_list, pick_rename, pick_delete, pick_toggle, pick_autobuy, pick_test
+# rename_url_name
 user_modes = defaultdict(lambda: None)
 
 user_started = set()
 user_urls = defaultdict(list)  # [{"url":..., "name":..., "enabled":..., "autobuy":...}]
 user_api_errors = defaultdict(int)
 
-# чтобы удалять прошлый “экран”
+# удаление прошлого “экрана”
 user_last_screen_msg_id = defaultdict(lambda: None)
 
-# промежуточное состояние
+# промежуточные
 user_pending_url = defaultdict(lambda: None)
-user_pending_rename_idx = defaultdict(lambda: None)
+user_pending_rename_url = defaultdict(lambda: None)
+
+# пагинация
+user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})  # ctx: 'pick_*'
 
 
 async def delete_last_screen(chat_id: int, user_id: int):
@@ -172,6 +188,52 @@ async def send_screen(
     return msg
 
 
+def build_urls_picker_kb(
+    sources: list[dict],
+    page: int,
+    back_text: str = "⬅️ Назад",
+) -> ReplyKeyboardMarkup:
+    """
+    Рисует клавиатуру с URL кнопками (по названию) + (опционально) пагинация.
+    ◀️/▶️ показываем только если страниц > 1.
+    """
+    total = len(sources)
+    if total <= 0:
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=back_text)]], resize_keyboard=True)
+
+    total_pages = (total + URL_PAGE_SIZE - 1) // URL_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * URL_PAGE_SIZE
+    end = min(total, start + URL_PAGE_SIZE)
+    chunk = sources[start:end]
+
+    rows: list[list[KeyboardButton]] = []
+    # по 2 кнопки в ряд
+    row: list[KeyboardButton] = []
+    for src in chunk:
+        idx = src["idx"]  # 1-based
+        name = src.get("name") or f"URL #{idx}"
+        btn_text = f"{idx}) {name}"
+        row.append(KeyboardButton(text=btn_text))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    # пагинация только если реально много
+    if total_pages > 1:
+        nav_row = []
+        nav_row.append(KeyboardButton(text="◀️ Назад страница"))
+        nav_row.append(KeyboardButton(text=f"📄 {page+1}/{total_pages}"))
+        nav_row.append(KeyboardButton(text="▶️ Далее"))
+        rows.append(nav_row)
+
+    rows.append([KeyboardButton(text=back_text)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 # ---------------------- БД ----------------------
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
@@ -186,7 +248,6 @@ async def init_db():
             PRIMARY KEY(user_id, url)
         )
         """)
-        # миграции
         cur = await db.execute("PRAGMA table_info(urls)")
         cols = [row[1] for row in await cur.fetchall()]
         if "enabled" not in cols:
@@ -204,7 +265,6 @@ async def init_db():
             PRIMARY KEY(user_id, item_key)
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS buy_attempted (
             user_id INTEGER,
@@ -213,7 +273,6 @@ async def init_db():
             PRIMARY KEY(user_id, item_key)
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -387,14 +446,12 @@ def normalize_url(url: str) -> str:
         return url
     s = url.strip().replace(" ", "").replace("\t", "").replace("\n", "")
 
-    # если явно prod-api — не ломаем
     if "prod-api.lzt.market" not in s.lower():
         s = re.sub(r"https?://api.*?\.market", "https://api.lzt.market", s)
         s = re.sub(r"https?://api\.lolz\.guru", "https://api.lzt.market", s)
         s = s.replace("://lzt.market", "://api.lzt.market")
         s = s.replace("://www.lzt.market", "://api.lzt.market")
 
-    # фиксы параметров (как у тебя)
     s = s.replace("genshinlevelmin", "genshin_level_min")
     s = s.replace("genshinlevel_min", "genshin_level_min")
     s = s.replace("genshin_levelmin", "genshin_level_min")
@@ -491,32 +548,58 @@ async def get_all_sources(user_id: int, enabled_only: bool = False):
         deduped.append(src)
     user_urls[user_id] = deduped
 
+    sources = user_urls[user_id]
     if enabled_only:
-        return [s for s in user_urls[user_id] if s.get("enabled", True)]
-    return user_urls[user_id]
+        sources = [s for s in sources if s.get("enabled", True)]
+
+    # добавим idx (1-based) всегда
+    out = []
+    for i, s in enumerate(user_urls[user_id], start=1):
+        if enabled_only and not s.get("enabled", True):
+            continue
+        out.append({**s, "idx": i})
+    return out
 
 
 async def fetch_all_sources(user_id: int):
+    """
+    Параллельная загрузка всех активных URL.
+    """
     sources = await get_all_sources(user_id, enabled_only=True)
-    results = []
-    errors = []
-    for idx, source in enumerate(sources):
-        url = source["url"]
-        label = source.get("name") or f"URL #{idx+1}"
+    if not sources:
+        return [], []
+
+    async def _fetch_one(src: dict):
+        url = src["url"]
+        label = src.get("name") or f"URL #{src['idx']}"
         source_info = {
-            "idx": idx + 1,
+            "idx": src["idx"],
             "url": url,
             "name": label,
-            "enabled": source.get("enabled", True),
-            "autobuy": source.get("autobuy", False),
+            "enabled": src.get("enabled", True),
+            "autobuy": src.get("autobuy", False),
         }
         items, err = await fetch_with_retry(url)
+        return source_info, items, err
+
+    tasks = [asyncio.create_task(_fetch_one(s)) for s in sources]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    items_with_sources = []
+    errors = []
+    for res in results:
+        if isinstance(res, Exception):
+            # редкая ошибка в таске
+            errors.append(("UNKNOWN", "UNKNOWN", str(res)))
+            continue
+        source_info, items, err = res
         if err:
-            errors.append((label, url, err))
+            errors.append((source_info["name"], source_info["url"], err))
             continue
         for it in items:
-            results.append((it, source_info))
-    return results, errors
+            items_with_sources.append((it, source_info))
+
+    return items_with_sources, errors
 
 
 # ---------------------- FILTERS ----------------------
@@ -561,7 +644,6 @@ def make_card(item: dict, source_name: str) -> str:
 
     lines.append(f"🆔 <code>{html.escape(str(item_id))}</code>")
 
-    # без inline кнопок: просто ссылка (кликабельно в Telegram)
     if item_id != "—":
         lines.append(f"🔗 https://lzt.market/{html.escape(str(item_id))}")
 
@@ -573,7 +655,7 @@ def make_card(item: dict, source_name: str) -> str:
     return card
 
 
-# ---------------------- AUTOBUY (ЛОГИКУ НЕ ЛОМАЕМ) ----------------------
+# ---------------------- AUTOBUY (НЕ ЛОМАЕМ) ----------------------
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
     payload = {}
@@ -618,9 +700,7 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
         source_base = ""
 
     base_hosts = []
-    # prod api first
     base_hosts.append("https://prod-api.lzt.market")
-
     if "api.lolz.live" in source_url.lower():
         base_hosts.append("https://api.lolz.live")
     if source_base:
@@ -675,7 +755,6 @@ def _autobuy_classify_response(status: int, text: str):
         "forbidden", "access denied"
     )
 
-    # 404/405 по неверному пути покупки: продолжаем перебор
     if status in (404, 405):
         return "retry", text[:220]
 
@@ -733,7 +812,6 @@ async def try_autobuy_item(source: dict, item: dict):
                         return False, f"{buy_url} -> {info}"
                     last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
 
-                # fallback: form
                 form_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
                 async with session.post(buy_url, headers=form_headers, data=payload, timeout=FETCH_TIMEOUT) as form_resp:
                     form_body = await form_resp.text()
@@ -780,38 +858,42 @@ async def show_status(user_id: int, chat_id: int):
     await load_user_data(user_id)
     role = await get_user_role(user_id) or "not set"
     active = user_search_active[user_id]
-    total = len(await get_all_sources(user_id))
-    enabled = len(await get_all_sources(user_id, enabled_only=True))
-    ab = sum(1 for s in await get_all_sources(user_id) if s.get("autobuy", False))
-    f = user_filters[user_id]["title"]
+    all_sources = await get_all_sources(user_id, enabled_only=False)
+    enabled_sources = [s for s in all_sources if s.get("enabled", True)]
+    ab = sum(1 for s in all_sources if s.get("autobuy", False))
 
     text = (
         "<b>📊 Статус</b>\n"
         f"• Роль: <b>{html.escape(role)}</b>\n"
         f"• Охотник: <b>{'ВКЛ' if active else 'ВЫКЛ'}</b>\n"
-        f"• URL: <b>{enabled}/{total}</b> (автобай: <b>{ab}</b>)\n"
+        f"• URL: <b>{len(enabled_sources)}/{len(all_sources)}</b> (автобай: <b>{ab}</b>)\n"
         f"• Увидено: <b>{len(user_seen_items[user_id])}</b>\n"
-        f"• Фильтр: <b>{html.escape(f) if f else 'нет'}</b>\n"
         f"• Ошибок API: <b>{user_api_errors.get(user_id, 0)}</b>"
     )
     await send_screen(chat_id, user_id, text, reply_markup=kb_main(), parse_mode="HTML")
 
 
-async def show_urls_list(user_id: int, chat_id: int):
+async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
     await load_user_data(user_id)
-    sources = await get_all_sources(user_id)
+    sources = await get_all_sources(user_id, enabled_only=False)
+
     if not sources:
-        await send_screen(chat_id, user_id, "📚 Список URL пуст.\nНажми ➕ Добавить URL", reply_markup=kb_urls())
+        await send_screen(chat_id, user_id, "📚 Список URL пуст.\nНажми ➕ Добавить URL", reply_markup=kb_urls_menu())
         return
 
-    lines = ["📚 <b>Мои URL</b>\n(показываю названия; URL внутри хранится)"]
-    for i, s in enumerate(sources, start=1):
-        name = s.get("name") or f"URL #{i}"
+    lines = ["📚 <b>Мои URL</b>\n(жми на кнопку снизу, чтобы посмотреть детали/состояние)"]
+    for s in sources:
+        idx = s["idx"]
+        name = s.get("name") or f"URL #{idx}"
         st = "🟢" if s.get("enabled", True) else "🔴"
         ab = "🛒" if s.get("autobuy", False) else "—"
-        lines.append(f"{st} {ab} <b>{i}.</b> {html.escape(name)}")
-    lines.append("\nПодсказка: для действий используй кнопки ниже.")
-    await send_screen(chat_id, user_id, "\n".join(lines), reply_markup=kb_urls(), parse_mode="HTML")
+        lines.append(f"{st} {ab} <b>{idx}.</b> {html.escape(name)}")
+
+    kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
+    user_modes[user_id] = "pick_list"
+    user_page_state[user_id] = {"ctx": "pick_list", "page": page}
+
+    await send_screen(chat_id, user_id, "\n".join(lines), reply_markup=kb, parse_mode="HTML")
 
 
 async def send_compact_10_for_user(user_id: int, chat_id: int):
@@ -850,18 +932,18 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
         if not passes_filters(item, user_id):
             continue
         await send_bot_message(chat_id, make_card(item, source["name"]), parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.1)
 
 
-async def send_test_for_single_url(user_id: int, chat_id: int, src: dict, idx: int):
+async def send_test_for_single_url(user_id: int, chat_id: int, src: dict):
     url = src["url"]
-    label = src.get("name") or f"URL #{idx}"
+    label = src.get("name") or f"URL #{src.get('idx', '?')}"
     items, err = await fetch_with_retry(url, max_retries=2)
     if err:
-        await send_screen(chat_id, user_id, f"❗ Ошибка теста <b>{html.escape(label)}</b>\n{html.escape(str(err))}", reply_markup=kb_urls(), parse_mode="HTML")
+        await send_screen(chat_id, user_id, f"❗ Ошибка теста <b>{html.escape(label)}</b>\n{html.escape(str(err))}", reply_markup=kb_urls_menu(), parse_mode="HTML")
         return
     if not items:
-        await send_screen(chat_id, user_id, f"⚠️ <b>{html.escape(label)}</b>: пусто.", reply_markup=kb_urls(), parse_mode="HTML")
+        await send_screen(chat_id, user_id, f"⚠️ <b>{html.escape(label)}</b>: пусто.", reply_markup=kb_urls_menu(), parse_mode="HTML")
         return
 
     aggregated = {}
@@ -875,7 +957,7 @@ async def send_test_for_single_url(user_id: int, chat_id: int, src: dict, idx: i
         chat_id,
         user_id,
         f"✅ Тест: <b>{html.escape(label)}</b>\n• Уникальных: <b>{len(aggregated)}</b>\n• Показано: <b>{len(limited)}</b>",
-        reply_markup=kb_urls(),
+        reply_markup=kb_urls_menu(),
         parse_mode="HTML",
     )
 
@@ -883,7 +965,7 @@ async def send_test_for_single_url(user_id: int, chat_id: int, src: dict, idx: i
         if not passes_filters(it, user_id):
             continue
         await send_bot_message(chat_id, make_card(it, label), parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.1)
 
 
 async def autobuy_sweep_existing(user_id: int, chat_id: int):
@@ -938,6 +1020,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     await db_mark_seen(user_id, key)
                     continue
 
+                # автобай
                 if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
                     user_buy_attempted[user_id].add(key)
                     await db_mark_buy_attempted(user_id, key)
@@ -954,11 +1037,12 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                         if "auth" in low or "secret" in low or "401" in low or "403" in low:
                             await send_bot_message(chat_id, f"⚠️ Автобай: {html.escape(str(buy_info))}", parse_mode="HTML")
 
+                # отправляем только НОВЫЕ
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
 
                 await send_bot_message(chat_id, make_card(item, source["name"]), parse_mode="HTML", disable_web_page_preview=True)
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.08)
 
             await asyncio.sleep(await user_hunter_interval(user_id))
 
@@ -992,39 +1076,73 @@ async def buttons_handler(message: types.Message):
     mode = user_modes[user_id]
 
     try:
-        # -------- MODES --------
+        # -------- PAGINATION BUTTONS (только если в pick режиме) --------
+        if text in ("◀️ Назад страница", "▶️ Далее") and user_page_state[user_id].get("ctx"):
+            ctx = user_page_state[user_id]["ctx"]
+            page = int(user_page_state[user_id]["page"])
+            sources = await get_all_sources(user_id, enabled_only=False)
+
+            total_pages = (len(sources) + URL_PAGE_SIZE - 1) // URL_PAGE_SIZE if sources else 1
+
+            if text == "◀️ Назад страница":
+                page = max(0, page - 1)
+            else:
+                page = min(total_pages - 1, page + 1)
+
+            user_page_state[user_id] = {"ctx": ctx, "page": page}
+
+            # перерисовка текущего pick-экрана
+            if ctx == "pick_list":
+                await show_urls_list_screen(user_id, chat_id, page=page)
+                return await safe_delete(message)
+
+            # для других контекстов — просто перерисуем выбор
+            kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
+            title = {
+                "pick_autobuy": "🛒 Выбери URL для переключения автобая",
+                "pick_toggle": "🔁 Выбери URL для ВКЛ/ВЫКЛ",
+                "pick_delete": "🗑 Выбери URL для удаления",
+                "pick_rename": "✏️ Выбери URL для переименования",
+                "pick_test": "✅ Выбери URL для теста",
+            }.get(ctx, "Выбери URL")
+
+            user_modes[user_id] = ctx
+            await send_screen(chat_id, user_id, title, reply_markup=kb)
+            return await safe_delete(message)
+
+        # -------- MODE: add url url --------
         if mode == "add_url_url":
             user_modes[user_id] = None
             url = normalize_url(text)
 
             ok, err = validate_market_url(url)
             if not ok:
-                await send_screen(chat_id, user_id, err, reply_markup=kb_urls())
+                await send_screen(chat_id, user_id, err, reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
             limit = await user_url_limit(user_id)
-            if len(await get_all_sources(user_id)) >= limit:
-                await send_screen(chat_id, user_id, f"❌ Достигнут лимит URL: {limit}", reply_markup=kb_urls())
+            if len(await get_all_sources(user_id, enabled_only=False)) >= limit:
+                await send_screen(chat_id, user_id, f"❌ Достигнут лимит URL: {limit}", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
             _items, api_err = await fetch_with_retry(url, max_retries=2)
             if api_err:
-                await send_screen(chat_id, user_id, f"❌ API ошибка: {api_err}", reply_markup=kb_urls())
+                await send_screen(chat_id, user_id, f"❌ API ошибка: {api_err}", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
             user_pending_url[user_id] = url
             user_modes[user_id] = "add_url_name"
-            await send_screen(chat_id, user_id, "✏️ Введи название для этого URL:", reply_markup=kb_urls())
+            await send_screen(chat_id, user_id, "✏️ Введи название для этого URL:", reply_markup=kb_urls_menu())
             return await safe_delete(message)
 
         if mode == "add_url_name":
-            name = text.strip()
+            name = (text or "").strip()
             url = user_pending_url.get(user_id)
             user_pending_url[user_id] = None
             user_modes[user_id] = None
 
             if not url:
-                await send_screen(chat_id, user_id, "⚠️ Не нашёл ожидаемый URL. Нажми ➕ Добавить URL ещё раз.", reply_markup=kb_urls())
+                await send_screen(chat_id, user_id, "⚠️ Не нашёл ожидаемый URL. Нажми ➕ Добавить URL ещё раз.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
             if not name:
@@ -1032,86 +1150,104 @@ async def buttons_handler(message: types.Message):
 
             await db_add_url(user_id, url, name)
             user_urls[user_id] = await db_get_urls(user_id)
-            await send_screen(chat_id, user_id, f"✅ URL добавлен: <b>{html.escape(name)}</b>", reply_markup=kb_urls(), parse_mode="HTML")
+
+            await send_screen(chat_id, user_id, f"✅ URL добавлен: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
-        if mode == "rename_url_idx":
-            user_modes[user_id] = None
-            try:
-                idx = int(re.sub(r"[^\d]", "", text))
-            except Exception:
-                idx = -1
-
-            sources = await get_all_sources(user_id)
-            if idx < 1 or idx > len(sources):
-                await send_screen(chat_id, user_id, "❌ Неверный номер. Смотри номер в 📄 Список URL", reply_markup=kb_urls())
-                return await safe_delete(message)
-
-            user_pending_rename_idx[user_id] = idx
-            user_modes[user_id] = "rename_url_name"
-            current_name = sources[idx - 1].get("name") or f"URL #{idx}"
-            await send_screen(chat_id, user_id, f"✏️ Новое название для <b>{html.escape(current_name)}</b>:", reply_markup=kb_urls(), parse_mode="HTML")
-            return await safe_delete(message)
-
+        # -------- MODE: rename name input --------
         if mode == "rename_url_name":
+            new_name = (text or "").strip()
             user_modes[user_id] = None
-            name = text.strip()
-            idx = user_pending_rename_idx.get(user_id)
-            user_pending_rename_idx[user_id] = None
 
-            sources = await get_all_sources(user_id)
-            if not idx or idx < 1 or idx > len(sources):
-                await send_screen(chat_id, user_id, "❌ Неверный номер. Смотри номер в 📄 Список URL", reply_markup=kb_urls())
+            url = user_pending_rename_url.get(user_id)
+            user_pending_rename_url[user_id] = None
+            if not url:
+                await send_screen(chat_id, user_id, "⚠️ Не нашёл URL для переименования. Повтори ✏️ Переименовать URL.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            if not name:
-                await send_screen(chat_id, user_id, "❌ Название не может быть пустым.", reply_markup=kb_urls())
+            if not new_name:
+                await send_screen(chat_id, user_id, "❌ Название не может быть пустым.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            src = sources[idx - 1]
-            await db_set_url_name(user_id, src["url"], name)
+            await db_set_url_name(user_id, url, new_name)
             user_urls[user_id] = await db_get_urls(user_id)
 
-            await send_screen(chat_id, user_id, f"✅ Переименовано: <b>{html.escape(name)}</b>", reply_markup=kb_urls(), parse_mode="HTML")
+            await send_screen(chat_id, user_id, f"✅ Переименовано в: <b>{html.escape(new_name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
-        if mode in ("del_url", "tog_url", "ab_url", "test_url"):
-            user_modes[user_id] = None
-            try:
-                idx = int(re.sub(r"[^\d]", "", text))
-            except Exception:
-                idx = -1
-
-            sources = await get_all_sources(user_id)
-            if idx < 1 or idx > len(sources):
-                await send_screen(chat_id, user_id, "❌ Неверный номер. Смотри номер в 📄 Список URL", reply_markup=kb_urls())
+        # -------- PICK MODES: выбор URL кнопкой --------
+        if mode and mode.startswith("pick_"):
+            if text == "⬅️ Назад":
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            src = sources[idx - 1]
+            idx = parse_index_from_button(text)
+            if idx is None:
+                # странный ввод — просто уберём сообщение
+                return await safe_delete(message)
+
+            sources = await get_all_sources(user_id, enabled_only=False)
+            src = next((s for s in sources if s["idx"] == idx), None)
+            if not src:
+                await send_screen(chat_id, user_id, "❌ Не нашёл этот URL. Открой список заново.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+
             name = src.get("name") or f"URL #{idx}"
 
-            if mode == "del_url":
-                await db_remove_url(user_id, src["url"])
-                user_urls[user_id] = await db_get_urls(user_id)
-                await send_screen(chat_id, user_id, f"🗑 Удалено: <b>{html.escape(name)}</b>", reply_markup=kb_urls(), parse_mode="HTML")
+            if mode == "pick_list":
+                # показать детали выбранного URL (ссылка показывается ТОЛЬКО тут)
+                detail = (
+                    f"<b>{html.escape(name)}</b>\n"
+                    f"• Статус: {'🟢 ВКЛ' if src.get('enabled', True) else '🔴 ВЫКЛ'}\n"
+                    f"• Автобай: {'🛒 ВКЛ' if src.get('autobuy', False) else '— ВЫКЛ'}\n"
+                    f"• API URL:\n<code>{html.escape(src['url'])}</code>"
+                )
+                # остаёмся в pick_list, чтобы можно было нажимать другие
+                page = user_page_state[user_id].get("page", 0)
+                kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
+                await send_screen(chat_id, user_id, detail, reply_markup=kb, parse_mode="HTML")
                 return await safe_delete(message)
 
-            if mode == "tog_url":
-                new_enabled = not src.get("enabled", True)
-                await db_set_url_enabled(user_id, src["url"], new_enabled)
-                user_urls[user_id] = await db_get_urls(user_id)
-                await send_screen(chat_id, user_id, f"🔁 {html.escape(name)}: {'ВКЛ' if new_enabled else 'ВЫКЛ'}", reply_markup=kb_urls())
-                return await safe_delete(message)
-
-            if mode == "ab_url":
+            if mode == "pick_autobuy":
                 new_ab = not src.get("autobuy", False)
                 await db_set_url_autobuy(user_id, src["url"], new_ab)
                 user_urls[user_id] = await db_get_urls(user_id)
-                await send_screen(chat_id, user_id, f"🛒 {html.escape(name)}: {'ВКЛ' if new_ab else 'ВЫКЛ'}", reply_markup=kb_urls())
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, f"🛒 {html.escape(name)}: {'ВКЛ' if new_ab else 'ВЫКЛ'}", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            if mode == "test_url":
-                await send_test_for_single_url(user_id, chat_id, src, idx)
+            if mode == "pick_toggle":
+                new_enabled = not src.get("enabled", True)
+                await db_set_url_enabled(user_id, src["url"], new_enabled)
+                user_urls[user_id] = await db_get_urls(user_id)
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, f"🔁 {html.escape(name)}: {'ВКЛ' if new_enabled else 'ВЫКЛ'}", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+
+            if mode == "pick_delete":
+                await db_remove_url(user_id, src["url"])
+                user_urls[user_id] = await db_get_urls(user_id)
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, f"🗑 Удалено: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
+                return await safe_delete(message)
+
+            if mode == "pick_test":
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_test_for_single_url(user_id, chat_id, src)
+                return await safe_delete(message)
+
+            if mode == "pick_rename":
+                # переходим ко вводу нового имени
+                user_pending_rename_url[user_id] = src["url"]
+                user_modes[user_id] = "rename_url_name"
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, f"✏️ Новое название для <b>{html.escape(name)}</b>:", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
         # -------- MAIN MENU --------
@@ -1172,51 +1308,86 @@ async def buttons_handler(message: types.Message):
             return await safe_delete(message)
 
         if text == "📚 Мои URL":
-            await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls())
+            user_modes[user_id] = None
+            user_page_state[user_id] = {"ctx": None, "page": 0}
+            await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
             return await safe_delete(message)
 
         # -------- URL MENU --------
         if text == "⬅️ Назад":
+            user_modes[user_id] = None
+            user_page_state[user_id] = {"ctx": None, "page": 0}
             await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main())
             return await safe_delete(message)
 
         if text == "📄 Список URL":
-            await show_urls_list(user_id, chat_id)
+            await show_urls_list_screen(user_id, chat_id, page=0)
             return await safe_delete(message)
 
         if text == "➕ Добавить URL":
             user_modes[user_id] = "add_url_url"
-            await send_screen(chat_id, user_id, "Вставь API URL (prod-api.lzt.market / api.lzt.market / api.lolz.live):", reply_markup=kb_urls())
-            return await safe_delete(message)
-
-        if text == "✏️ Переименовать URL":
-            user_modes[user_id] = "rename_url_idx"
-            await send_screen(chat_id, user_id, "Введи номер URL из 📄 Список URL:", reply_markup=kb_urls())
-            return await safe_delete(message)
-
-        if text == "🗑 Удалить URL":
-            user_modes[user_id] = "del_url"
-            await send_screen(chat_id, user_id, "Введи номер URL из 📄 Список URL:", reply_markup=kb_urls())
-            return await safe_delete(message)
-
-        if text == "🔁 Вкл/Выкл URL":
-            user_modes[user_id] = "tog_url"
-            await send_screen(chat_id, user_id, "Введи номер URL:", reply_markup=kb_urls())
+            user_page_state[user_id] = {"ctx": None, "page": 0}
+            await send_screen(chat_id, user_id, "Вставь API URL (prod-api.lzt.market / api.lzt.market / api.lolz.live):", reply_markup=kb_urls_menu())
             return await safe_delete(message)
 
         if text == "🛒 Автобай URL":
-            user_modes[user_id] = "ab_url"
-            await send_screen(chat_id, user_id, "Введи номер URL:", reply_markup=kb_urls())
+            sources = await get_all_sources(user_id, enabled_only=False)
+            if not sources:
+                await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+            user_modes[user_id] = "pick_autobuy"
+            user_page_state[user_id] = {"ctx": "pick_autobuy", "page": 0}
+            kb = build_urls_picker_kb(sources, page=0, back_text="⬅️ Назад")
+            await send_screen(chat_id, user_id, "🛒 Выбери URL для переключения автобая:", reply_markup=kb)
+            return await safe_delete(message)
+
+        if text == "✏️ Переименовать URL":
+            sources = await get_all_sources(user_id, enabled_only=False)
+            if not sources:
+                await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+            user_modes[user_id] = "pick_rename"
+            user_page_state[user_id] = {"ctx": "pick_rename", "page": 0}
+            kb = build_urls_picker_kb(sources, page=0, back_text="⬅️ Назад")
+            await send_screen(chat_id, user_id, "✏️ Выбери URL для переименования:", reply_markup=kb)
+            return await safe_delete(message)
+
+        if text == "🗑 Удалить URL":
+            sources = await get_all_sources(user_id, enabled_only=False)
+            if not sources:
+                await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+            user_modes[user_id] = "pick_delete"
+            user_page_state[user_id] = {"ctx": "pick_delete", "page": 0}
+            kb = build_urls_picker_kb(sources, page=0, back_text="⬅️ Назад")
+            await send_screen(chat_id, user_id, "🗑 Выбери URL для удаления:", reply_markup=kb)
+            return await safe_delete(message)
+
+        if text == "🔁 Вкл/Выкл URL":
+            sources = await get_all_sources(user_id, enabled_only=False)
+            if not sources:
+                await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+            user_modes[user_id] = "pick_toggle"
+            user_page_state[user_id] = {"ctx": "pick_toggle", "page": 0}
+            kb = build_urls_picker_kb(sources, page=0, back_text="⬅️ Назад")
+            await send_screen(chat_id, user_id, "🔁 Выбери URL для ВКЛ/ВЫКЛ:", reply_markup=kb)
             return await safe_delete(message)
 
         if text == "✅ Тест URL":
-            user_modes[user_id] = "test_url"
-            await send_screen(chat_id, user_id, "Введи номер URL:", reply_markup=kb_urls())
+            sources = await get_all_sources(user_id, enabled_only=False)
+            if not sources:
+                await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+                return await safe_delete(message)
+            user_modes[user_id] = "pick_test"
+            user_page_state[user_id] = {"ctx": "pick_test", "page": 0}
+            kb = build_urls_picker_kb(sources, page=0, back_text="⬅️ Назад")
+            await send_screen(chat_id, user_id, "✅ Выбери URL для теста:", reply_markup=kb)
             return await safe_delete(message)
 
-        # любые лишние сообщения пользователя — удаляем, чтобы чат был чистый
+        # лишнее — удаляем сообщение пользователя, чтобы чат был чистый
         if text and not text.startswith("/"):
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.15)
             await safe_delete(message)
 
     except Exception as e:
@@ -1230,7 +1401,7 @@ async def buttons_handler(message: types.Message):
 # ---------------------- RUN ----------------------
 async def main():
     global bot
-    print("[BOT] Start: multiuser + url names + rename + bottom panels + no inline controls")
+    print("[BOT] Start: parallel fetch + 0.6s loop + url pick keyboards + pagination")
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
