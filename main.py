@@ -22,8 +22,12 @@ LZT_API_KEY = os.getenv("LZT_API_KEY") or _LZT_API_KEY
 bot: Bot | None = None
 dp = Dispatcher()
 
+# ---------------------- OWNER / ACCESS ----------------------
+OWNER_ID = 1377985336
+OWNER_IDS = {OWNER_ID}
+
 # ---------------------- НАСТРОЙКИ ----------------------
-HUNTER_INTERVAL_BASE = 0.6  # было 1.0 -> ускорили
+HUNTER_INTERVAL_BASE = 0.6
 SHORT_CARD_MAX = 950
 ERROR_REPORT_INTERVAL = 3600
 
@@ -43,7 +47,10 @@ DB_FILE = "bot_data.sqlite"
 LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
 
 # Пагинация URL кнопок
-URL_PAGE_SIZE = 12  # 12 URL на страницу (6 рядов по 2 кнопки)
+URL_PAGE_SIZE = 12  # 12 URL на страницу
+
+# Пагинация пользователей
+USER_PAGE_SIZE = 14  # чтобы клавиатура не раздувалась
 
 # ---------------------- START MESSAGES ----------------------
 START_MSG_1 = (
@@ -62,17 +69,29 @@ START_MSG_2 = (
     "• ♻️ Сбросить историю — чтобы снова считать лоты новыми"
 )
 
-# ---------------------- UI: НИЖНИЕ ПАНЕЛИ ----------------------
-def kb_main() -> ReplyKeyboardMarkup:
+DENIED_TEXT = (
+    "⛔️ Доступ к боту закрыт по умолчанию.\n\n"
+    "Нажми кнопку ниже, чтобы отправить запрос владельцу."
+)
+
+# ---------------------- UI: КЛАВИАТУРЫ ----------------------
+def kb_request() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🚀 Старт охотника"), KeyboardButton(text="🛑 Стоп охотника")],
-            [KeyboardButton(text="✨ Проверка лотов"), KeyboardButton(text="📊 Статус")],
-            [KeyboardButton(text="📚 Мои URL"), KeyboardButton(text="♻️ Сбросить историю")],
-            [KeyboardButton(text="ℹ️ Инфо")],
-        ],
+        keyboard=[[KeyboardButton(text="🔓 Запрос на бота")]],
         resize_keyboard=True,
     )
+
+
+def kb_main(user_id: int) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="🚀 Старт охотника"), KeyboardButton(text="🛑 Стоп охотника")],
+        [KeyboardButton(text="✨ Проверка лотов"), KeyboardButton(text="📊 Статус")],
+        [KeyboardButton(text="📚 Мои URL"), KeyboardButton(text="♻️ Сбросить историю")],
+        [KeyboardButton(text="ℹ️ Инфо")],
+    ]
+    if user_id in OWNER_IDS:
+        rows.insert(3, [KeyboardButton(text="👥 Пользователи")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def kb_urls_menu() -> ReplyKeyboardMarkup:
@@ -87,7 +106,7 @@ def kb_urls_menu() -> ReplyKeyboardMarkup:
     )
 
 
-# ---------------------- ВСПОМОГАТЕЛИ ----------------------
+# ---------------------- HELPERS ----------------------
 def has_valid_telegram_token(token: str) -> bool:
     if not token:
         return False
@@ -115,9 +134,6 @@ def make_item_key(item: dict) -> str:
 
 
 def parse_index_from_button(text: str) -> int | None:
-    """
-    Кнопки URL идут в формате: "1) Название"
-    """
     m = re.match(r"^\s*(\d+)\)", text or "")
     if not m:
         return None
@@ -127,7 +143,7 @@ def parse_index_from_button(text: str) -> int | None:
         return None
 
 
-# ---------------------- ПАМЯТЬ (по юзеру) ----------------------
+# ---------------------- STATE (IN MEMORY) ----------------------
 user_filters = defaultdict(lambda: {"title": None})
 user_search_active = defaultdict(lambda: False)
 
@@ -137,25 +153,23 @@ user_buy_attempted = defaultdict(set)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 
 # modes:
-# None
 # add_url_url -> add_url_name
-# pick_* (выбор URL кнопкой): pick_list, pick_rename, pick_delete, pick_toggle, pick_autobuy, pick_test
+# pick_* : pick_list, pick_rename, pick_delete, pick_toggle, pick_autobuy, pick_test
 # rename_url_name
+# users_pick (owner toggles access)
 user_modes = defaultdict(lambda: None)
 
 user_started = set()
-user_urls = defaultdict(list)  # [{"url":..., "name":..., "enabled":..., "autobuy":...}]
+user_urls = defaultdict(list)
 user_api_errors = defaultdict(int)
 
-# удаление прошлого “экрана”
 user_last_screen_msg_id = defaultdict(lambda: None)
 
-# промежуточные
 user_pending_url = defaultdict(lambda: None)
 user_pending_rename_url = defaultdict(lambda: None)
 
-# пагинация
-user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})  # ctx: 'pick_*'
+# paging
+user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
 
 async def delete_last_screen(chat_id: int, user_id: int):
@@ -188,15 +202,7 @@ async def send_screen(
     return msg
 
 
-def build_urls_picker_kb(
-    sources: list[dict],
-    page: int,
-    back_text: str = "⬅️ Назад",
-) -> ReplyKeyboardMarkup:
-    """
-    Рисует клавиатуру с URL кнопками (по названию) + (опционально) пагинация.
-    ◀️/▶️ показываем только если страниц > 1.
-    """
+def build_urls_picker_kb(sources: list[dict], page: int, back_text: str = "⬅️ Назад") -> ReplyKeyboardMarkup:
     total = len(sources)
     if total <= 0:
         return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=back_text)]], resize_keyboard=True)
@@ -209,10 +215,9 @@ def build_urls_picker_kb(
     chunk = sources[start:end]
 
     rows: list[list[KeyboardButton]] = []
-    # по 2 кнопки в ряд
     row: list[KeyboardButton] = []
     for src in chunk:
-        idx = src["idx"]  # 1-based
+        idx = src["idx"]
         name = src.get("name") or f"URL #{idx}"
         btn_text = f"{idx}) {name}"
         row.append(KeyboardButton(text=btn_text))
@@ -222,19 +227,63 @@ def build_urls_picker_kb(
     if row:
         rows.append(row)
 
-    # пагинация только если реально много
     if total_pages > 1:
-        nav_row = []
-        nav_row.append(KeyboardButton(text="◀️ Назад страница"))
-        nav_row.append(KeyboardButton(text=f"📄 {page+1}/{total_pages}"))
-        nav_row.append(KeyboardButton(text="▶️ Далее"))
-        rows.append(nav_row)
+        rows.append([
+            KeyboardButton(text="◀️ Назад страница"),
+            KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
+            KeyboardButton(text="▶️ Далее"),
+        ])
 
     rows.append([KeyboardButton(text=back_text)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-# ---------------------- БД ----------------------
+def build_users_picker_kb(users: list[tuple[int, int, str]], page: int) -> ReplyKeyboardMarkup:
+    """
+    users: (user_id, allowed(0/1), role)
+    """
+    total = len(users)
+    if total <= 0:
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+            resize_keyboard=True,
+        )
+
+    total_pages = (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * USER_PAGE_SIZE
+    end = min(total, start + USER_PAGE_SIZE)
+    chunk = users[start:end]
+
+    rows: list[list[KeyboardButton]] = []
+    for uid, allowed, role in chunk:
+        icon = "✅" if allowed else "⛔️"
+        rows.append([KeyboardButton(text=f"{icon} {uid}")])
+
+    if total_pages > 1:
+        rows.append([
+            KeyboardButton(text="◀️ Назад страница"),
+            KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
+            KeyboardButton(text="▶️ Далее"),
+        ])
+
+    rows.append([KeyboardButton(text="⬅️ Назад")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def parse_user_id_from_button(text: str) -> int | None:
+    # "✅ 123" / "⛔️ 123"
+    m = re.search(r"(\d{5,})", text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+# ---------------------- DB ----------------------
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -273,22 +322,95 @@ async def init_db():
             PRIMARY KEY(user_id, item_key)
         )
         """)
+
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             role TEXT DEFAULT 'unknown',
-            last_error_report INTEGER DEFAULT 0
+            allowed INTEGER DEFAULT 0,
+            last_error_report INTEGER DEFAULT 0,
+            last_request_ts INTEGER DEFAULT 0
         )
         """)
+
+        # migrations
+        cur = await db.execute("PRAGMA table_info(users)")
+        ucols = [row[1] for row in await cur.fetchall()]
+        if "allowed" not in ucols:
+            await db.execute("ALTER TABLE users ADD COLUMN allowed INTEGER DEFAULT 0")
+        if "last_request_ts" not in ucols:
+            await db.execute("ALTER TABLE users ADD COLUMN last_request_ts INTEGER DEFAULT 0")
+        if "last_error_report" not in ucols:
+            await db.execute("ALTER TABLE users ADD COLUMN last_error_report INTEGER DEFAULT 0")
+
         await db.commit()
 
 
 async def db_ensure_user(user_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO users(user_id, role, last_error_report) VALUES (?, ?, ?)",
-            (user_id, "unknown", 0),
+            "INSERT OR IGNORE INTO users(user_id, role, allowed, last_error_report, last_request_ts) VALUES (?, ?, ?, ?, ?)",
+            (user_id, "unknown", 1 if user_id in OWNER_IDS else 0, 0, 0),
         )
+        # owner всегда разрешён
+        if user_id in OWNER_IDS:
+            await db.execute("UPDATE users SET allowed=1 WHERE user_id=?", (user_id,))
+        await db.commit()
+
+
+async def db_is_allowed(user_id: int) -> bool:
+    if user_id in OWNER_IDS:
+        return True
+    async with aiosqlite.connect(DB_FILE) as db:
+        cur = await db.execute("SELECT allowed FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return bool(row[0]) if row else False
+
+
+async def db_toggle_allowed(target_user_id: int) -> bool:
+    """
+    Переключает allowed 0/1, возвращает новый статус (True=allowed)
+    """
+    if target_user_id in OWNER_IDS:
+        return True
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "UPDATE users SET allowed = CASE WHEN COALESCE(allowed,0)=1 THEN 0 ELSE 1 END WHERE user_id=?",
+            (target_user_id,),
+        )
+        cur = await db.execute("SELECT allowed FROM users WHERE user_id=?", (target_user_id,))
+        row = await cur.fetchone()
+        await db.commit()
+        return bool(row[0]) if row else False
+
+
+async def db_list_users(limit: int, offset: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        cur = await db.execute(
+            "SELECT user_id, allowed, role FROM users ORDER BY user_id LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        rows = await cur.fetchall()
+        return [(int(r[0]), int(r[1] or 0), str(r[2] or "unknown")) for r in rows]
+
+
+async def db_count_users() -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        cur = await db.execute("SELECT COUNT(1) FROM users")
+        row = await cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+
+async def db_get_last_request_ts(user_id: int) -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        cur = await db.execute("SELECT last_request_ts FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+
+async def db_set_last_request_ts(user_id: int, ts: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET last_request_ts=? WHERE user_id=?", (ts, user_id))
         await db.commit()
 
 
@@ -537,7 +659,6 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
 async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
 
-    # дедуп
     deduped = []
     seen = set()
     for src in user_urls[user_id]:
@@ -548,11 +669,6 @@ async def get_all_sources(user_id: int, enabled_only: bool = False):
         deduped.append(src)
     user_urls[user_id] = deduped
 
-    sources = user_urls[user_id]
-    if enabled_only:
-        sources = [s for s in sources if s.get("enabled", True)]
-
-    # добавим idx (1-based) всегда
     out = []
     for i, s in enumerate(user_urls[user_id], start=1):
         if enabled_only and not s.get("enabled", True):
@@ -562,9 +678,6 @@ async def get_all_sources(user_id: int, enabled_only: bool = False):
 
 
 async def fetch_all_sources(user_id: int):
-    """
-    Параллельная загрузка всех активных URL.
-    """
     sources = await get_all_sources(user_id, enabled_only=True)
     if not sources:
         return [], []
@@ -589,7 +702,6 @@ async def fetch_all_sources(user_id: int):
     errors = []
     for res in results:
         if isinstance(res, Exception):
-            # редкая ошибка в таске
             errors.append(("UNKNOWN", "UNKNOWN", str(res)))
             continue
         source_info, items, err = res
@@ -600,16 +712,6 @@ async def fetch_all_sources(user_id: int):
             items_with_sources.append((it, source_info))
 
     return items_with_sources, errors
-
-
-# ---------------------- FILTERS ----------------------
-def passes_filters(item: dict, user_id: int) -> bool:
-    f = user_filters[user_id]
-    if f["title"]:
-        title = (item.get("title") or "").lower()
-        if f["title"].lower() not in title:
-            return False
-    return True
 
 
 # ---------------------- DISPLAY ----------------------
@@ -655,7 +757,7 @@ def make_card(item: dict, source_name: str) -> str:
     return card
 
 
-# ---------------------- AUTOBUY (НЕ ЛОМАЕМ) ----------------------
+# ---------------------- AUTOBUY (НЕ ТРОГАЕМ ЛОГИКУ) ----------------------
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
     payload = {}
@@ -854,6 +956,10 @@ async def error_reporter_loop():
 
 
 # ---------------------- ACTIONS ----------------------
+async def show_denied(user_id: int, chat_id: int):
+    await send_screen(chat_id, user_id, DENIED_TEXT, reply_markup=kb_request())
+
+
 async def show_status(user_id: int, chat_id: int):
     await load_user_data(user_id)
     role = await get_user_role(user_id) or "not set"
@@ -870,7 +976,7 @@ async def show_status(user_id: int, chat_id: int):
         f"• Увидено: <b>{len(user_seen_items[user_id])}</b>\n"
         f"• Ошибок API: <b>{user_api_errors.get(user_id, 0)}</b>"
     )
-    await send_screen(chat_id, user_id, text, reply_markup=kb_main(), parse_mode="HTML")
+    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id), parse_mode="HTML")
 
 
 async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
@@ -896,6 +1002,31 @@ async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
     await send_screen(chat_id, user_id, "\n".join(lines), reply_markup=kb, parse_mode="HTML")
 
 
+async def show_users_screen(owner_id: int, chat_id: int, page: int = 0):
+    total = await db_count_users()
+    # тянем "с запасом" для пагинации в памяти
+    rows = await db_list_users(limit=5000, offset=0)
+
+    # owner всегда сверху (и пометим)
+    rows_sorted = []
+    for uid, allowed, role in rows:
+        if uid in OWNER_IDS:
+            allowed = 1
+        rows_sorted.append((uid, allowed, role))
+    rows_sorted.sort(key=lambda x: (0 if x[0] in OWNER_IDS else 1, x[0]))
+
+    kb = build_users_picker_kb(rows_sorted, page=page)
+    user_modes[owner_id] = "users_pick"
+    user_page_state[owner_id] = {"ctx": "users_pick", "page": page}
+
+    txt = (
+        f"👥 <b>Пользователи</b>\n"
+        f"Всего в базе: <b>{total}</b>\n\n"
+        "Нажми на пользователя, чтобы переключить доступ ✅/⛔️"
+    )
+    await send_screen(chat_id, owner_id, txt, reply_markup=kb, parse_mode="HTML")
+
+
 async def send_compact_10_for_user(user_id: int, chat_id: int):
     items_with_sources, errors = await fetch_all_sources(user_id)
 
@@ -909,7 +1040,7 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
             )
 
     if not items_with_sources:
-        await send_screen(chat_id, user_id, "❗ Ничего не найдено по активным URL.", reply_markup=kb_main())
+        await send_screen(chat_id, user_id, "❗ Ничего не найдено по активным URL.", reply_markup=kb_main(user_id))
         return
 
     aggregated = {}
@@ -924,15 +1055,13 @@ async def send_compact_10_for_user(user_id: int, chat_id: int):
         chat_id,
         user_id,
         f"✅ <b>Проверка лотов</b>\n• Показано: <b>{len(items_list)}</b>",
-        reply_markup=kb_main(),
+        reply_markup=kb_main(user_id),
         parse_mode="HTML",
     )
 
     for item, source in items_list:
-        if not passes_filters(item, user_id):
-            continue
         await send_bot_message(chat_id, make_card(item, source["name"]), parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.08)
 
 
 async def send_test_for_single_url(user_id: int, chat_id: int, src: dict):
@@ -962,10 +1091,8 @@ async def send_test_for_single_url(user_id: int, chat_id: int, src: dict):
     )
 
     for it in limited:
-        if not passes_filters(it, user_id):
-            continue
         await send_bot_message(chat_id, make_card(it, label), parse_mode="HTML", disable_web_page_preview=True)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.08)
 
 
 async def autobuy_sweep_existing(user_id: int, chat_id: int):
@@ -998,7 +1125,6 @@ async def autobuy_sweep_existing(user_id: int, chat_id: int):
 
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
-
     try:
         await autobuy_sweep_existing(user_id, chat_id)
     except Exception:
@@ -1015,16 +1141,9 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if key in user_seen_items[user_id]:
                     continue
 
-                if not passes_filters(item, user_id):
-                    user_seen_items[user_id].add(key)
-                    await db_mark_seen(user_id, key)
-                    continue
-
-                # автобай
                 if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
                     user_buy_attempted[user_id].add(key)
                     await db_mark_buy_attempted(user_id, key)
-
                     bought, buy_info = await try_autobuy_item(source, item)
                     if bought:
                         await send_bot_message(
@@ -1037,12 +1156,11 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                         if "auth" in low or "secret" in low or "401" in low or "403" in low:
                             await send_bot_message(chat_id, f"⚠️ Автобай: {html.escape(str(buy_info))}", parse_mode="HTML")
 
-                # отправляем только НОВЫЕ
                 user_seen_items[user_id].add(key)
                 await db_mark_seen(user_id, key)
 
                 await send_bot_message(chat_id, make_card(item, source["name"]), parse_mode="HTML", disable_web_page_preview=True)
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.05)
 
             await asyncio.sleep(await user_hunter_interval(user_id))
 
@@ -1059,8 +1177,15 @@ async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     await load_user_data(user_id, force=True)
 
+    # стартовые 2 сообщения всегда
     await send_bot_message(message.chat.id, START_MSG_1, disable_web_page_preview=True)
-    await send_bot_message(message.chat.id, START_MSG_2, reply_markup=kb_main(), disable_web_page_preview=True)
+    allowed = await db_is_allowed(user_id)
+
+    if allowed:
+        await send_bot_message(message.chat.id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True)
+    else:
+        await send_bot_message(message.chat.id, START_MSG_2, disable_web_page_preview=True)
+        await show_denied(user_id, message.chat.id)
 
     user_last_screen_msg_id[user_id] = None
     await safe_delete(message)
@@ -1075,28 +1200,60 @@ async def buttons_handler(message: types.Message):
     text = (message.text or "").strip()
     mode = user_modes[user_id]
 
+    # ---- ACCESS GATE ----
+    allowed = await db_is_allowed(user_id)
+    if not allowed and user_id not in OWNER_IDS:
+        if text == "🔓 Запрос на бота":
+            now = int(time.time())
+            last = await db_get_last_request_ts(user_id)
+            # анти-спам: 60 сек
+            if now - last < 60:
+                await send_screen(chat_id, user_id, "⏳ Запрос уже отправлен. Подожди немного.", reply_markup=kb_request())
+                return await safe_delete(message)
+
+            await db_set_last_request_ts(user_id, now)
+            # уведомление owner'у
+            try:
+                await send_bot_message(
+                    OWNER_ID,
+                    f"🔔 <b>Запрос доступа</b>\nПользователь: <code>{user_id}</code>\n\nОткрой 👥 Пользователи и нажми на него, чтобы разрешить.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            await send_screen(chat_id, user_id, "✅ Запрос отправлен. Жди разрешения.", reply_markup=kb_request())
+            return await safe_delete(message)
+
+        # любые другие кнопки/сообщения — показываем заглушку
+        await show_denied(user_id, chat_id)
+        return await safe_delete(message)
+
+    # ---- OWNER / USERS PAGE NAV ----
     try:
-        # -------- PAGINATION BUTTONS (только если в pick режиме) --------
+        # навигация страниц (urls/users)
         if text in ("◀️ Назад страница", "▶️ Далее") and user_page_state[user_id].get("ctx"):
             ctx = user_page_state[user_id]["ctx"]
             page = int(user_page_state[user_id]["page"])
+
+            if ctx == "users_pick":
+                # users pagination
+                total = await db_count_users()
+                total_pages = (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE if total else 1
+                page = max(0, min(page + (-1 if text == "◀️ Назад страница" else 1), total_pages - 1))
+                await show_users_screen(user_id, chat_id, page=page)
+                return await safe_delete(message)
+
+            # urls pagination
             sources = await get_all_sources(user_id, enabled_only=False)
-
             total_pages = (len(sources) + URL_PAGE_SIZE - 1) // URL_PAGE_SIZE if sources else 1
-
-            if text == "◀️ Назад страница":
-                page = max(0, page - 1)
-            else:
-                page = min(total_pages - 1, page + 1)
-
+            page = max(0, min(page + (-1 if text == "◀️ Назад страница" else 1), total_pages - 1))
             user_page_state[user_id] = {"ctx": ctx, "page": page}
 
-            # перерисовка текущего pick-экрана
             if ctx == "pick_list":
                 await show_urls_list_screen(user_id, chat_id, page=page)
                 return await safe_delete(message)
 
-            # для других контекстов — просто перерисуем выбор
             kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
             title = {
                 "pick_autobuy": "🛒 Выбери URL для переключения автобая",
@@ -1105,12 +1262,46 @@ async def buttons_handler(message: types.Message):
                 "pick_rename": "✏️ Выбери URL для переименования",
                 "pick_test": "✅ Выбери URL для теста",
             }.get(ctx, "Выбери URL")
-
             user_modes[user_id] = ctx
             await send_screen(chat_id, user_id, title, reply_markup=kb)
             return await safe_delete(message)
 
-        # -------- MODE: add url url --------
+        # ---- OWNER: USERS PICK ----
+        if mode == "users_pick" and user_id in OWNER_IDS:
+            if text == "⬅️ Назад":
+                user_modes[user_id] = None
+                user_page_state[user_id] = {"ctx": None, "page": 0}
+                await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
+                return await safe_delete(message)
+
+            target_uid = parse_user_id_from_button(text)
+            if target_uid is None:
+                return await safe_delete(message)
+
+            await db_ensure_user(target_uid)
+            new_allowed = await db_toggle_allowed(target_uid)
+
+            # уведомим пользователя
+            try:
+                if new_allowed:
+                    await send_bot_message(
+                        target_uid,
+                        "✅ Доступ к боту разрешён владельцем.\nНажми /start",
+                    )
+                else:
+                    await send_bot_message(
+                        target_uid,
+                        "⛔️ Доступ к боту отключён владельцем.\nЧтобы запросить снова — нажми /start и кнопку запроса.",
+                    )
+            except Exception:
+                pass
+
+            # перерисуем список на той же странице
+            page = int(user_page_state[user_id].get("page", 0))
+            await show_users_screen(user_id, chat_id, page=page)
+            return await safe_delete(message)
+
+        # ---- MODES: add url ----
         if mode == "add_url_url":
             user_modes[user_id] = None
             url = normalize_url(text)
@@ -1154,7 +1345,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, f"✅ URL добавлен: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
-        # -------- MODE: rename name input --------
+        # ---- rename input ----
         if mode == "rename_url_name":
             new_name = (text or "").strip()
             user_modes[user_id] = None
@@ -1175,7 +1366,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, f"✅ Переименовано в: <b>{html.escape(new_name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
-        # -------- PICK MODES: выбор URL кнопкой --------
+        # ---- pick urls ----
         if mode and mode.startswith("pick_"):
             if text == "⬅️ Назад":
                 user_modes[user_id] = None
@@ -1185,7 +1376,6 @@ async def buttons_handler(message: types.Message):
 
             idx = parse_index_from_button(text)
             if idx is None:
-                # странный ввод — просто уберём сообщение
                 return await safe_delete(message)
 
             sources = await get_all_sources(user_id, enabled_only=False)
@@ -1197,14 +1387,12 @@ async def buttons_handler(message: types.Message):
             name = src.get("name") or f"URL #{idx}"
 
             if mode == "pick_list":
-                # показать детали выбранного URL (ссылка показывается ТОЛЬКО тут)
                 detail = (
                     f"<b>{html.escape(name)}</b>\n"
                     f"• Статус: {'🟢 ВКЛ' if src.get('enabled', True) else '🔴 ВЫКЛ'}\n"
                     f"• Автобай: {'🛒 ВКЛ' if src.get('autobuy', False) else '— ВЫКЛ'}\n"
                     f"• API URL:\n<code>{html.escape(src['url'])}</code>"
                 )
-                # остаёмся в pick_list, чтобы можно было нажимать другие
                 page = user_page_state[user_id].get("page", 0)
                 kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
                 await send_screen(chat_id, user_id, detail, reply_markup=kb, parse_mode="HTML")
@@ -1243,14 +1431,17 @@ async def buttons_handler(message: types.Message):
                 return await safe_delete(message)
 
             if mode == "pick_rename":
-                # переходим ко вводу нового имени
                 user_pending_rename_url[user_id] = src["url"]
                 user_modes[user_id] = "rename_url_name"
                 user_page_state[user_id] = {"ctx": None, "page": 0}
                 await send_screen(chat_id, user_id, f"✏️ Новое название для <b>{html.escape(name)}</b>:", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
-        # -------- MAIN MENU --------
+        # ---- MAIN MENU ----
+        if text == "👥 Пользователи" and user_id in OWNER_IDS:
+            await show_users_screen(user_id, chat_id, page=0)
+            return await safe_delete(message)
+
         if text == "ℹ️ Инфо":
             await send_screen(
                 chat_id,
@@ -1259,7 +1450,7 @@ async def buttons_handler(message: types.Message):
                 "📚 Мои URL → управление источниками.\n"
                 "🚀 Старт охотника → уведомления о новых лотах.\n"
                 "🛒 Автобай включается по конкретному URL.",
-                reply_markup=kb_main(),
+                reply_markup=kb_main(user_id),
             )
             return await safe_delete(message)
 
@@ -1276,13 +1467,13 @@ async def buttons_handler(message: types.Message):
             user_buy_attempted[user_id].clear()
             await db_clear_seen(user_id)
             await db_clear_buy_attempted(user_id)
-            await send_screen(chat_id, user_id, "♻️ История сброшена. Теперь лоты снова считаются новыми.", reply_markup=kb_main())
+            await send_screen(chat_id, user_id, "♻️ История сброшена. Теперь лоты снова считаются новыми.", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text == "🚀 Старт охотника":
             active_sources = await get_all_sources(user_id, enabled_only=True)
             if not active_sources:
-                await send_screen(chat_id, user_id, "❌ Нет активных URL. Зайди в 📚 Мои URL и добавь источник.", reply_markup=kb_main())
+                await send_screen(chat_id, user_id, "❌ Нет активных URL. Зайди в 📚 Мои URL и добавь источник.", reply_markup=kb_main(user_id))
                 return await safe_delete(message)
 
             if not user_search_active[user_id]:
@@ -1293,10 +1484,10 @@ async def buttons_handler(message: types.Message):
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
 
-                await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}", reply_markup=kb_main())
+                await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}", reply_markup=kb_main(user_id))
                 return await safe_delete(message)
 
-            await send_screen(chat_id, user_id, "⚠️ Охотник уже запущен.", reply_markup=kb_main())
+            await send_screen(chat_id, user_id, "⚠️ Охотник уже запущен.", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text == "🛑 Стоп охотника":
@@ -1304,7 +1495,7 @@ async def buttons_handler(message: types.Message):
             task = user_hunter_tasks.get(user_id)
             if task:
                 task.cancel()
-            await send_screen(chat_id, user_id, "🛑 Охотник остановлен.", reply_markup=kb_main())
+            await send_screen(chat_id, user_id, "🛑 Охотник остановлен.", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text == "📚 Мои URL":
@@ -1313,11 +1504,11 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
             return await safe_delete(message)
 
-        # -------- URL MENU --------
+        # ---- URL MENU ----
         if text == "⬅️ Назад":
             user_modes[user_id] = None
             user_page_state[user_id] = {"ctx": None, "page": 0}
-            await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main())
+            await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text == "📄 Список URL":
@@ -1385,9 +1576,9 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "✅ Выбери URL для теста:", reply_markup=kb)
             return await safe_delete(message)
 
-        # лишнее — удаляем сообщение пользователя, чтобы чат был чистый
+        # лишнее — чистим
         if text and not text.startswith("/"):
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.12)
             await safe_delete(message)
 
     except Exception as e:
@@ -1401,7 +1592,7 @@ async def buttons_handler(message: types.Message):
 # ---------------------- RUN ----------------------
 async def main():
     global bot
-    print("[BOT] Start: parallel fetch + 0.6s loop + url pick keyboards + pagination")
+    print("[BOT] Start: access gate + requests + owner toggle + parallel fetch + 0.6s")
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
