@@ -16,17 +16,18 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
 
+# ====================== ENV ======================
 API_TOKEN = os.getenv("API_TOKEN") or _API_TOKEN
 LZT_API_KEY = os.getenv("LZT_API_KEY") or _LZT_API_KEY
 
 bot: Bot | None = None
 dp = Dispatcher()
 
-# ---------------------- OWNER / ACCESS ----------------------
+# ====================== OWNER / ACCESS ======================
 OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
 
-# ---------------------- НАСТРОЙКИ (ТВОИ) ----------------------
+# ====================== НАСТРОЙКИ (ТВОИ) ======================
 HUNTER_INTERVAL_BASE = 0.20
 FETCH_TIMEOUT = 5.40
 BUY_TIMEOUT = 6
@@ -40,7 +41,6 @@ MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
 MAX_CONCURRENT_REQUESTS = 10
-
 ADMIN_PASSWORD = "1303"
 LIMITED_EXTRA_DELAY = 3.0
 
@@ -48,20 +48,16 @@ DB_FILE = "bot_data.sqlite"
 
 LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
 
-# Пагинация URL кнопок
-URL_PAGE_SIZE = 12  # 12 URL на страницу
+URL_PAGE_SIZE = 12
+USER_PAGE_SIZE = 14
 
-# Пагинация пользователей
-USER_PAGE_SIZE = 14  # чтобы клавиатура не раздувалась
-
-# ---------------------- LOGGING ----------------------
+# ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
 LOG_MAX_BYTES = 15 * 1024 * 1024  # 15MB
 LOG_ROTATE_KEEP = 2  # keep .1 and .2
 
 
 def _ts_str() -> str:
-    # local time string
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
@@ -79,7 +75,6 @@ def _rotate_log_if_needed():
         if os.path.getsize(AUTOBUY_LOG_FILE) < LOG_MAX_BYTES:
             return
 
-        # rotate: log -> log.1 -> log.2
         for i in range(LOG_ROTATE_KEEP, 0, -1):
             src = f"{AUTOBUY_LOG_FILE}.{i}"
             dst = f"{AUTOBUY_LOG_FILE}.{i+1}"
@@ -112,7 +107,7 @@ def log_autobuy(line: str):
         pass
 
 
-# ---------------------- START MESSAGES ----------------------
+# ====================== START MESSAGES ======================
 START_MSG_1 = (
     "🤖 Parsing Bot 🤖\n"
     "😶‍🌫️Отслеживание новых лотов по вашим URL в один клик😶‍🌫️\n\n"
@@ -134,7 +129,7 @@ DENIED_TEXT = (
     "Нажми кнопку ниже, чтобы отправить запрос владельцу."
 )
 
-# ---------------------- UI: КЛАВИАТУРЫ ----------------------
+# ====================== UI: KEYBOARDS ======================
 def kb_request() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🔓 Запрос на бота")]],
@@ -166,7 +161,7 @@ def kb_urls_menu() -> ReplyKeyboardMarkup:
     )
 
 
-# ---------------------- HELPERS ----------------------
+# ====================== HELPERS ======================
 def has_valid_telegram_token(token: str) -> bool:
     if not token:
         return False
@@ -203,7 +198,7 @@ def parse_index_from_button(text: str) -> int | None:
         return None
 
 
-# ---------------------- STATE (IN MEMORY) ----------------------
+# ====================== STATE (IN MEMORY) ======================
 user_filters = defaultdict(lambda: {"title": None})
 user_search_active = defaultdict(lambda: False)
 
@@ -212,26 +207,18 @@ user_buy_attempted = defaultdict(set)
 
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 
-# modes:
-# add_url_url -> add_url_name
-# pick_* : pick_list, pick_rename, pick_delete, pick_toggle, pick_autobuy, pick_test
-# rename_url_name
-# users_pick (owner toggles access)
-user_modes = defaultdict(lambda: None)
-
+user_modes = defaultdict(lambda: None)  # add_url_url/add_url_name/pick_*/rename_url_name/users_pick
 user_started = set()
 user_urls = defaultdict(list)
 user_api_errors = defaultdict(int)
 
 user_last_screen_msg_id = defaultdict(lambda: None)
-
 user_pending_url = defaultdict(lambda: None)
 user_pending_rename_url = defaultdict(lambda: None)
 
-# paging
 user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
-# speed / autobuy caches
+# autobuy speed caches
 autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
 buy_semaphore = asyncio.Semaphore(3)
@@ -292,8 +279,7 @@ def build_urls_picker_kb(sources: list[dict], page: int, back_text: str = "⬅�
     for src in chunk:
         idx = src["idx"]
         name = src.get("name") or f"URL #{idx}"
-        btn_text = f"{idx}) {name}"
-        row.append(KeyboardButton(text=btn_text))
+        row.append(KeyboardButton(text=f"{idx}) {name}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -301,11 +287,13 @@ def build_urls_picker_kb(sources: list[dict], page: int, back_text: str = "⬅�
         rows.append(row)
 
     if total_pages > 1:
-        rows.append([
-            KeyboardButton(text="◀️ Назад страница"),
-            KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
-            KeyboardButton(text="▶️ Далее"),
-        ])
+        rows.append(
+            [
+                KeyboardButton(text="◀️ Назад страница"),
+                KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
+                KeyboardButton(text="▶️ Далее"),
+            ]
+        )
 
     rows.append([KeyboardButton(text=back_text)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -314,10 +302,7 @@ def build_urls_picker_kb(sources: list[dict], page: int, back_text: str = "⬅�
 def build_users_picker_kb(users: list[tuple[int, int, str]], page: int) -> ReplyKeyboardMarkup:
     total = len(users)
     if total <= 0:
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
-            resize_keyboard=True,
-        )
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Назад")]], resize_keyboard=True)
 
     total_pages = (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE
     page = max(0, min(page, total_pages - 1))
@@ -332,11 +317,13 @@ def build_users_picker_kb(users: list[tuple[int, int, str]], page: int) -> Reply
         rows.append([KeyboardButton(text=f"{icon} {uid}")])
 
     if total_pages > 1:
-        rows.append([
-            KeyboardButton(text="◀️ Назад страница"),
-            KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
-            KeyboardButton(text="▶️ Далее"),
-        ])
+        rows.append(
+            [
+                KeyboardButton(text="◀️ Назад страница"),
+                KeyboardButton(text=f"📄 {page+1}/{total_pages}"),
+                KeyboardButton(text="▶️ Далее"),
+            ]
+        )
 
     rows.append([KeyboardButton(text="⬅️ Назад")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -352,10 +339,11 @@ def parse_user_id_from_button(text: str) -> int | None:
         return None
 
 
-# ---------------------- DB ----------------------
+# ====================== DB ======================
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS urls (
             user_id INTEGER,
             url TEXT,
@@ -365,7 +353,8 @@ async def init_db():
             autobuy INTEGER DEFAULT 0,
             PRIMARY KEY(user_id, url)
         )
-        """)
+        """
+        )
         cur = await db.execute("PRAGMA table_info(urls)")
         cols = [row[1] for row in await cur.fetchall()]
         if "enabled" not in cols:
@@ -375,24 +364,28 @@ async def init_db():
         if "name" not in cols:
             await db.execute("ALTER TABLE urls ADD COLUMN name TEXT DEFAULT ''")
 
-        await db.execute("""
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS seen (
             user_id INTEGER,
             item_key TEXT,
             seen_at INTEGER,
             PRIMARY KEY(user_id, item_key)
         )
-        """)
-        await db.execute("""
+        """
+        )
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS buy_attempted (
             user_id INTEGER,
             item_key TEXT,
             attempted_at INTEGER,
             PRIMARY KEY(user_id, item_key)
         )
-        """)
-
-        await db.execute("""
+        """
+        )
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             role TEXT DEFAULT 'unknown',
@@ -400,7 +393,8 @@ async def init_db():
             last_error_report INTEGER DEFAULT 0,
             last_request_ts INTEGER DEFAULT 0
         )
-        """)
+        """
+        )
 
         cur = await db.execute("PRAGMA table_info(users)")
         ucols = [row[1] for row in await cur.fetchall()]
@@ -593,7 +587,7 @@ async def db_clear_buy_attempted(user_id: int):
         await db.commit()
 
 
-# ---------------------- LOAD USER DATA ----------------------
+# ====================== LOAD USER DATA ======================
 async def load_user_data(user_id: int, force: bool = False):
     if user_id in user_started and not force:
         return
@@ -621,7 +615,7 @@ async def user_hunter_interval(user_id: int) -> float:
     return HUNTER_INTERVAL_BASE + extra
 
 
-# ---------------------- URL VALIDATION/NORMALIZATION ----------------------
+# ====================== URL VALIDATION/NORMALIZATION ======================
 def validate_market_url(url: str):
     if not url.startswith(("http://", "https://")):
         return False, "❌ Это не похоже на URL."
@@ -658,7 +652,7 @@ def normalize_url(url: str) -> str:
     return s
 
 
-# ---------------------- HTTP / API ----------------------
+# ====================== HTTP / API ======================
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 _global_session: aiohttp.ClientSession | None = None
 
@@ -741,7 +735,7 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
     return [], "❌ Не удалось получить ответ"
 
 
-# ---------------------- SOURCES ----------------------
+# ====================== SOURCES ======================
 async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
 
@@ -831,50 +825,107 @@ async def iter_sources_results(user_id: int):
                 t.cancel()
 
 
-# ---------------------- DISPLAY ----------------------
+# ====================== DISPLAY (FULL CARD) ======================
 def make_card(item: dict, source_name: str) -> str:
-    title = item.get("title", "Без названия")
-    price = item.get("price", "—")
-    item_id = item.get("item_id", item.get("id", "—"))
+    title = str(item.get("title", "Без названия"))
+    price = item.get("price", None)
+    item_id = item.get("item_id") or item.get("id")
 
     trophies = item.get("trophies") or item.get("cups") or item.get("brawl_cup") or None
     level = item.get("level") or item.get("lvl") or item.get("user_level") or None
     townhall = item.get("townhall") or item.get("th") or None
-    phone_bound = item.get("phone_bound") or item.get("phone")
+    phone_bound = item.get("phone_bound")
+    if phone_bound is None:
+        phone_bound = item.get("phone")
 
-    lines = [
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"🔎 <b>{html.escape(str(source_name))}</b>",
-        f"🎮 <b>{html.escape(str(title))}</b>",
-    ]
-    if level:
-        lines.append(f"🔼 Уровень: <b>{html.escape(str(level))}</b>")
-    if trophies:
-        lines.append(f"🏆 Кубков: <b>{html.escape(str(trophies))}</b>")
-    if townhall:
-        lines.append(f"🏰 Ратуша: <b>{html.escape(str(townhall))}</b>")
-    if phone_bound is not None:
-        lines.append(f"📱 Телефон: <b>{'Да' if phone_bound else 'Нет'}</b>")
+    seller_id = item.get("seller_id") or item.get("owner_id") or item.get("user_id")
+    category = item.get("category") or item.get("category_name") or item.get("game") or item.get("type")
+    published_at = item.get("published_at") or item.get("created_at") or item.get("date") or item.get("time")
+    views = item.get("views") or item.get("view_count")
+    likes = item.get("likes") or item.get("favorites") or item.get("fav_count")
 
-    if price != "—":
-        lines.append(f"💰 <b>{html.escape(str(price))} ₽</b>")
+    desc = item.get("description") or item.get("desc") or ""
+    if isinstance(desc, str):
+        desc = html.unescape(desc).strip()
     else:
-        lines.append("💰 —")
+        desc = ""
 
-    lines.append(f"🆔 <code>{html.escape(str(item_id))}</code>")
+    direct_url = item.get("url") or item.get("link") or None
 
-    if item_id != "—":
+    def _fmt_int(x):
+        try:
+            return f"{int(x):,}".replace(",", " ")
+        except Exception:
+            return str(x)
+
+    def _fmt_time(x):
+        try:
+            if isinstance(x, (int, float)) and x > 0:
+                return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(x)))
+        except Exception:
+            pass
+        return str(x) if x is not None else None
+
+    src = html.escape(str(source_name or "Источник"))
+    ttl = html.escape(title)
+    iid = html.escape(str(item_id)) if item_id is not None else "—"
+
+    lines = []
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🔎 <b>{src}</b>")
+    lines.append(f"🎮 <b>{ttl}</b>")
+    lines.append(f"🆔 <code>{iid}</code>")
+
+    meta = []
+    if category:
+        meta.append(f"🏷 {html.escape(str(category))}")
+    if seller_id is not None:
+        meta.append(f"👤 seller: <code>{html.escape(str(seller_id))}</code>")
+    if views is not None:
+        meta.append(f"👁 {html.escape(_fmt_int(views))}")
+    if likes is not None:
+        meta.append(f"⭐ {html.escape(_fmt_int(likes))}")
+    if published_at is not None:
+        meta.append(f"🕒 {html.escape(_fmt_time(published_at))}")
+    if meta:
+        lines.append(" • ".join(meta))
+
+    if level is not None:
+        lines.append(f"🔼 Уровень: <b>{html.escape(_fmt_int(level))}</b>")
+    if trophies is not None:
+        lines.append(f"🏆 Кубков: <b>{html.escape(_fmt_int(trophies))}</b>")
+    if townhall is not None:
+        lines.append(f"🏰 Ратуша: <b>{html.escape(_fmt_int(townhall))}</b>")
+    if phone_bound is not None:
+        lines.append(f"📱 Телефон привязан: <b>{'Да' if phone_bound else 'Нет'}</b>")
+
+    if price is not None and price != "—":
+        lines.append(f"💰 Цена: <b>{html.escape(_fmt_int(price))} ₽</b>")
+    else:
+        lines.append("💰 Цена: <b>—</b>")
+
+    if direct_url:
+        lines.append(f"🔗 {html.escape(str(direct_url))}")
+    elif item_id is not None:
         lines.append(f"🔗 https://lzt.market/{html.escape(str(item_id))}")
+
+    if desc:
+        clean = re.sub(r"\s{3,}", "  ", desc).strip()
+        if len(clean) > 800:
+            clean = clean[:780] + "…"
+        lines.append("")
+        lines.append("📝 <b>Описание</b>")
+        lines.append(html.escape(clean))
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     card = "\n".join(lines)
     if len(card) > SHORT_CARD_MAX:
-        return card[:SHORT_CARD_MAX - 120] + "\n… <i>(обрезано)</i>"
+        return card[: SHORT_CARD_MAX - 80] + "\n… <i>(обрезано)</i>\n━━━━━━━━━━━━━━━━━━━━"
     return card
 
 
-# ---------------------- AUTOBUY ----------------------
+# ====================== AUTOBUY ======================
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
     payload = {}
@@ -882,13 +933,15 @@ def _autobuy_payload_variants(item: dict):
         payload.update({"price": price, "item_price": price, "amount": price})
 
     if LZT_SECRET_WORD:
-        payload.update({
-            "secret_answer": LZT_SECRET_WORD,
-            "secret_word": LZT_SECRET_WORD,
-            "secretWord": LZT_SECRET_WORD,
-            "qa_answer": LZT_SECRET_WORD,
-            "answer": LZT_SECRET_WORD,
-        })
+        payload.update(
+            {
+                "secret_answer": LZT_SECRET_WORD,
+                "secret_word": LZT_SECRET_WORD,
+                "secretWord": LZT_SECRET_WORD,
+                "qa_answer": LZT_SECRET_WORD,
+                "answer": LZT_SECRET_WORD,
+            }
+        )
 
     variants = [
         payload,
@@ -1017,14 +1070,21 @@ def _autobuy_classify_response(status: int, text: str):
         data = json.loads(raw)
         joined = json.dumps(data, ensure_ascii=False).lower()
     except Exception:
-        data = None
         joined = lower
 
     success_markers = ("success", "ok", "purchased", "purchase complete", "already bought", "уже куп")
     terminal_error_markers = (
-        "insufficient", "not enough", "недостаточно",
-        "уже продан", "already sold", "already purchased", "already bought",
-        "цена изменилась", "нельзя купить", "forbidden", "access denied"
+        "insufficient",
+        "not enough",
+        "недостаточно",
+        "уже продан",
+        "already sold",
+        "already purchased",
+        "already bought",
+        "цена изменилась",
+        "нельзя купить",
+        "forbidden",
+        "access denied",
     )
 
     if status in (404, 405):
@@ -1082,7 +1142,6 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
         payload_variants = _autobuy_payload_variants(item)
         buy_urls = _autobuy_prioritized_urls(source_url, item_id)
 
-        # from found->buy (best-effort)
         since_found_ms = None
         if found_perf is not None:
             since_found_ms = int((t0 - found_perf) * 1000)
@@ -1101,7 +1160,6 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                     for payload in payload_variants:
                         need_form_retry = False
 
-                        # JSON attempt
                         try:
                             async with session.post(
                                 buy_url,
@@ -1112,7 +1170,6 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                                 body = await resp.text()
                                 state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
 
-                                # log only meaningful states + non-404/405, to not slow down too much
                                 if resp.status not in (404, 405):
                                     log_autobuy(
                                         f"BUY_TRY item_id={item_id} status={resp.status} state={state} "
@@ -1127,7 +1184,9 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
 
                                 if state == "auth":
                                     dur_ms = int((time.perf_counter() - t0) * 1000)
-                                    log_autobuy(f"BUY_AUTH_FAIL item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'")
+                                    log_autobuy(
+                                        f"BUY_AUTH_FAIL item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'"
+                                    )
                                     return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
 
                                 if state == "secret":
@@ -1137,7 +1196,9 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                                 if state == "terminal":
                                     _remember_autobuy_endpoint(source_url, buy_url)
                                     dur_ms = int((time.perf_counter() - t0) * 1000)
-                                    log_autobuy(f"BUY_TERMINAL item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'")
+                                    log_autobuy(
+                                        f"BUY_TERMINAL item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'"
+                                    )
                                     return False, f"{buy_url} -> {info}"
 
                                 last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
@@ -1155,7 +1216,6 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                         if not need_form_retry:
                             continue
 
-                        # FORM attempt (only when really needed)
                         try:
                             async with session.post(
                                 buy_url,
@@ -1180,7 +1240,9 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
 
                                 if state == "auth":
                                     dur_ms = int((time.perf_counter() - t0) * 1000)
-                                    log_autobuy(f"BUY_AUTH_FAIL_FORM item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'")
+                                    log_autobuy(
+                                        f"BUY_AUTH_FAIL_FORM item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'"
+                                    )
                                     return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
 
                                 if state == "secret":
@@ -1190,7 +1252,9 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                                 if state == "terminal":
                                     _remember_autobuy_endpoint(source_url, buy_url)
                                     dur_ms = int((time.perf_counter() - t0) * 1000)
-                                    log_autobuy(f"BUY_TERMINAL_FORM item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'")
+                                    log_autobuy(
+                                        f"BUY_TERMINAL_FORM item_id={item_id} dur_ms={dur_ms} url={buy_url} info='{_safe_compact(info,220)}'"
+                                    )
                                     return False, f"{buy_url} (form) -> {info}"
 
                                 last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
@@ -1208,17 +1272,13 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
             log_autobuy(f"BUY_FAIL item_id={item_id} dur_ms={dur_ms} last_err='{_safe_compact(last_err,300)}'")
             return False, last_err
 
-        except asyncio.TimeoutError:
-            dur_ms = int((time.perf_counter() - t0) * 1000)
-            log_autobuy(f"BUY_FAIL item_id={item_id} dur_ms={dur_ms} last_err='buy_timeout_outer'")
-            return False, "buy_timeout"
         except Exception as e:
             dur_ms = int((time.perf_counter() - t0) * 1000)
             log_autobuy(f"BUY_FAIL item_id={item_id} dur_ms={dur_ms} last_err='{_safe_compact(str(e),300)}'")
             return False, str(e)
 
 
-# ---------------------- REPORTER ----------------------
+# ====================== REPORTER ======================
 async def error_reporter_loop():
     while True:
         try:
@@ -1239,7 +1299,7 @@ async def error_reporter_loop():
             await asyncio.sleep(ERROR_REPORT_INTERVAL)
 
 
-# ---------------------- ACTIONS ----------------------
+# ====================== ACTIONS ======================
 async def show_denied(user_id: int, chat_id: int):
     await send_screen(chat_id, user_id, DENIED_TEXT, reply_markup=kb_request())
 
@@ -1353,7 +1413,13 @@ async def send_test_for_single_url(user_id: int, chat_id: int, src: dict):
     label = src.get("name") or f"URL #{src.get('idx', '?')}"
     items, err = await fetch_with_retry(url, max_retries=2)
     if err:
-        await send_screen(chat_id, user_id, f"❗ Ошибка теста <b>{html.escape(label)}</b>\n{html.escape(str(err))}", reply_markup=kb_urls_menu(), parse_mode="HTML")
+        await send_screen(
+            chat_id,
+            user_id,
+            f"❗ Ошибка теста <b>{html.escape(label)}</b>\n{html.escape(str(err))}",
+            reply_markup=kb_urls_menu(),
+            parse_mode="HTML",
+        )
         return
     if not items:
         await send_screen(chat_id, user_id, f"⚠️ <b>{html.escape(label)}</b>: пусто.", reply_markup=kb_urls_menu(), parse_mode="HTML")
@@ -1396,7 +1462,6 @@ async def autobuy_sweep_existing(user_id: int, chat_id: int):
             user_buy_attempted[user_id].add(key)
             await db_mark_buy_attempted(user_id, key)
 
-            # found_perf None here (existing sweep)
             bought, _info = await try_autobuy_item(source, item, found_perf=None)
             if bought:
                 await send_bot_message(
@@ -1433,8 +1498,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if not items:
                     continue
 
-                # to slightly prioritize newest first if API returns unsorted
-                # (if there is an id - higher is usually newer)
+                # чуть приоритезируем "новые" (если id растёт)
                 try:
                     items = sorted(items, key=lambda x: int(x.get("item_id") or x.get("id") or 0), reverse=True)
                 except Exception:
@@ -1449,16 +1513,12 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     item_id = item.get("item_id") or item.get("id")
                     src_name = source.get("name") or "UNKNOWN"
 
-                    # ---- AUTOBUY ----
                     if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
                         user_buy_attempted[user_id].add(key)
                         await db_mark_buy_attempted(user_id, key)
 
                         bought, buy_info = await try_autobuy_item(source, item, found_perf=found_perf)
-
-                        # обработка времени (в чат не спамим, но в лог уже записано)
                         if bought:
-                            # в чат коротко + ms
                             dur_ms = int((time.perf_counter() - found_perf) * 1000)
                             await send_bot_message(
                                 chat_id,
@@ -1471,11 +1531,9 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                             if "auth" in low or "secret" in low or "401" in low or "403" in low:
                                 await send_bot_message(chat_id, f"⚠️ Автобай: {html.escape(str(buy_info))}", parse_mode="HTML")
 
-                    # ---- MARK SEEN + NOTIFY ITEM ----
                     user_seen_items[user_id].add(key)
                     seen_batch.append(key)
 
-                    # card send (optional: if you want max speed, you can comment this out)
                     await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
 
             await db_mark_seen_batch(user_id, seen_batch)
@@ -1498,7 +1556,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             await asyncio.sleep(max(await user_hunter_interval(user_id), 0.8))
 
 
-# ---------------------- HANDLERS ----------------------
+# ====================== HANDLERS ======================
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     user_id = message.from_user.id
@@ -1526,6 +1584,7 @@ async def buttons_handler(message: types.Message):
     text = (message.text or "").strip()
     mode = user_modes[user_id]
 
+    # ---- ACCESS GATE ----
     allowed = await db_is_allowed(user_id)
     if not allowed and user_id not in OWNER_IDS:
         if text == "🔓 Запрос на бота":
@@ -1552,6 +1611,7 @@ async def buttons_handler(message: types.Message):
         return await safe_delete(message)
 
     try:
+        # ---- pagination ----
         if text in ("◀️ Назад страница", "▶️ Далее") and user_page_state[user_id].get("ctx"):
             ctx = user_page_state[user_id]["ctx"]
             page = int(user_page_state[user_id]["page"])
@@ -1584,6 +1644,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, title, reply_markup=kb)
             return await safe_delete(message)
 
+        # ---- OWNER: users pick ----
         if mode == "users_pick" and user_id in OWNER_IDS:
             if text == "⬅️ Назад":
                 user_modes[user_id] = None
@@ -1610,6 +1671,7 @@ async def buttons_handler(message: types.Message):
             await show_users_screen(user_id, chat_id, page=page)
             return await safe_delete(message)
 
+        # ---- MODES: add url ----
         if mode == "add_url_url":
             user_modes[user_id] = None
             url = normalize_url(text)
@@ -1653,6 +1715,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, f"✅ URL добавлен: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
+        # ---- rename input ----
         if mode == "rename_url_name":
             new_name = (text or "").strip()
             user_modes[user_id] = None
@@ -1673,6 +1736,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, f"✅ Переименовано в: <b>{html.escape(new_name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
+        # ---- pick urls ----
         if mode and mode.startswith("pick_"):
             if text == "⬅️ Назад":
                 user_modes[user_id] = None
@@ -1743,6 +1807,7 @@ async def buttons_handler(message: types.Message):
                 await send_screen(chat_id, user_id, f"✏️ Новое название для <b>{html.escape(name)}</b>:", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
+        # ---- MAIN MENU ----
         if text == "👥 Пользователи" and user_id in OWNER_IDS:
             await show_users_screen(user_id, chat_id, page=0)
             return await safe_delete(message)
@@ -1813,6 +1878,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
             return await safe_delete(message)
 
+        # ---- URL MENU ----
         if text == "⬅️ Назад":
             user_modes[user_id] = None
             user_page_state[user_id] = {"ctx": None, "page": 0}
@@ -1884,6 +1950,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "✅ Выбери URL для теста:", reply_markup=kb)
             return await safe_delete(message)
 
+        # лишнее — чистим
         if text and not text.startswith("/"):
             await asyncio.sleep(0.12)
             await safe_delete(message)
@@ -1896,10 +1963,10 @@ async def buttons_handler(message: types.Message):
         await safe_delete(message)
 
 
-# ---------------------- RUN ----------------------
+# ====================== RUN ======================
 async def main():
     global bot
-    print("[BOT] Start: speed hunter + autobuy log + timings")
+    print("[BOT] Start: speed hunter + full card + autobuy log + timings")
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
