@@ -57,6 +57,11 @@ AUTOBUY_RETRY_ATTEMPTS = 4
 AUTOBUY_RETRY_MIN_DELAY = 1.0
 AUTOBUY_RETRY_MAX_DELAY = 2.0
 
+SEEN_RETENTION_SECONDS = 48 * 3600
+CLEANUP_INTERVAL = 3600
+BACKUP_INTERVAL = 60
+DATA_BACKUP_FILE = "bot_state_backup.json"
+
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
 LOG_MAX_BYTES = 15 * 1024 * 1024
@@ -149,7 +154,7 @@ def kb_main(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🚀 Старт охотника"), KeyboardButton(text="🛑 Стоп охотника")],
         [KeyboardButton(text="✨ Проверка лотов"), KeyboardButton(text="📊 Статус")],
         [KeyboardButton(text="📚 Мои URL"), KeyboardButton(text="♻️ Сбросить историю")],
-        [KeyboardButton(text="ℹ️ Инфо")],
+        [KeyboardButton(text="🧪 Диагностика"), KeyboardButton(text="ℹ️ Инфо")],
     ]
     if user_id in OWNER_IDS:
         rows.insert(3, [KeyboardButton(text="👥 Пользователи")])
@@ -250,6 +255,13 @@ user_last_screen_msg_id = defaultdict(lambda: None)
 user_pending_url = defaultdict(lambda: None)
 user_pending_rename_url = defaultdict(lambda: None)
 user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
+user_runtime_stats = defaultdict(lambda: {
+    "autobuy_ok": 0,
+    "autobuy_fail": 0,
+    "last_autobuy_error": "",
+    "last_autobuy_ok_ts": 0,
+    "last_autobuy_item": "",
+})
 
 autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
@@ -476,6 +488,17 @@ async def init_db():
         )
     """, commit=True)
 
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS user_stats (
+            user_id INTEGER PRIMARY KEY,
+            autobuy_ok INTEGER DEFAULT 0,
+            autobuy_fail INTEGER DEFAULT 0,
+            last_autobuy_error TEXT DEFAULT '',
+            last_autobuy_ok_ts INTEGER DEFAULT 0,
+            last_autobuy_item TEXT DEFAULT ''
+        )
+    """, commit=True)
+
     ucols = [row[1] for row in await db_fetchall("PRAGMA table_info(users)")]
     if "allowed" not in ucols:
         await db_execute("ALTER TABLE users ADD COLUMN allowed INTEGER DEFAULT 0", commit=True)
@@ -493,6 +516,11 @@ async def db_ensure_user(user_id: int):
     )
     if user_id in OWNER_IDS:
         await db_execute("UPDATE users SET allowed=1 WHERE user_id=?", (user_id,), commit=True)
+    await db_execute(
+        "INSERT OR IGNORE INTO user_stats(user_id, autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item) VALUES (?, 0, 0, '', 0, '')",
+        (user_id,),
+        commit=True,
+    )
 
 
 async def db_is_allowed(user_id: int) -> bool:
@@ -617,6 +645,180 @@ async def db_clear_buy_attempted(user_id: int):
     await db_execute("DELETE FROM buy_attempted WHERE user_id=?", (user_id,), commit=True)
 
 
+async def db_get_user_stats(user_id: int):
+    row = await db_fetchone(
+        "SELECT autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item FROM user_stats WHERE user_id=?",
+        (user_id,),
+    )
+    if not row:
+        return {"autobuy_ok": 0, "autobuy_fail": 0, "last_autobuy_error": "", "last_autobuy_ok_ts": 0, "last_autobuy_item": ""}
+    return {
+        "autobuy_ok": int(row[0] or 0),
+        "autobuy_fail": int(row[1] or 0),
+        "last_autobuy_error": str(row[2] or ""),
+        "last_autobuy_ok_ts": int(row[3] or 0),
+        "last_autobuy_item": str(row[4] or ""),
+    }
+
+
+async def db_record_autobuy_result(user_id: int, ok: bool, item_desc: str, error_text: str = ""):
+    await db_ensure_user(user_id)
+    if ok:
+        await db_execute(
+            """
+            INSERT INTO user_stats(user_id, autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item)
+            VALUES (?, 1, 0, '', ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                autobuy_ok = COALESCE(autobuy_ok, 0) + 1,
+                last_autobuy_ok_ts = excluded.last_autobuy_ok_ts,
+                last_autobuy_item = excluded.last_autobuy_item
+            """,
+            (user_id, int(time.time()), item_desc[:255]),
+            commit=True,
+        )
+    else:
+        await db_execute(
+            """
+            INSERT INTO user_stats(user_id, autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item)
+            VALUES (?, 0, 1, ?, 0, '')
+            ON CONFLICT(user_id) DO UPDATE SET
+                autobuy_fail = COALESCE(autobuy_fail, 0) + 1,
+                last_autobuy_error = excluded.last_autobuy_error
+            """,
+            (user_id, error_text[:1000]),
+            commit=True,
+        )
+
+
+async def db_cleanup_old_history(retention_seconds: int = SEEN_RETENTION_SECONDS):
+    cutoff = int(time.time()) - int(retention_seconds)
+    await db_execute("DELETE FROM seen WHERE seen_at < ?", (cutoff,), commit=True)
+    await db_execute("DELETE FROM buy_attempted WHERE attempted_at < ?", (cutoff,), commit=True)
+
+
+async def db_counts_snapshot():
+    users = await db_fetchone("SELECT COUNT(1) FROM users")
+    urls = await db_fetchone("SELECT COUNT(1) FROM urls")
+    seen = await db_fetchone("SELECT COUNT(1) FROM seen")
+    buy = await db_fetchone("SELECT COUNT(1) FROM buy_attempted")
+    return {
+        "users": int(users[0] or 0) if users else 0,
+        "urls": int(urls[0] or 0) if urls else 0,
+        "seen": int(seen[0] or 0) if seen else 0,
+        "buy_attempted": int(buy[0] or 0) if buy else 0,
+    }
+
+
+async def write_backup_snapshot():
+    db = await db_counts_snapshot()
+    payload = {
+        "saved_at": int(time.time()),
+        "db_counts": db,
+        "users": [
+            {
+                "user_id": int(r[0]),
+                "role": str(r[1] or "unknown"),
+                "allowed": int(r[2] or 0),
+                "last_error_report": int(r[3] or 0),
+                "last_request_ts": int(r[4] or 0),
+            }
+            for r in await db_fetchall("SELECT user_id, role, allowed, last_error_report, last_request_ts FROM users ORDER BY user_id")
+        ],
+        "urls": [
+            {
+                "user_id": int(r[0]),
+                "url": str(r[1]),
+                "name": str(r[2] or ""),
+                "added_at": int(r[3] or 0),
+                "enabled": int(r[4] or 0),
+                "autobuy": int(r[5] or 0),
+            }
+            for r in await db_fetchall("SELECT user_id, url, name, added_at, enabled, autobuy FROM urls ORDER BY user_id, added_at, url")
+        ],
+        "seen": [
+            {"user_id": int(r[0]), "item_key": str(r[1]), "seen_at": int(r[2] or 0)}
+            for r in await db_fetchall("SELECT user_id, item_key, seen_at FROM seen")
+        ],
+        "buy_attempted": [
+            {"user_id": int(r[0]), "item_key": str(r[1]), "attempted_at": int(r[2] or 0)}
+            for r in await db_fetchall("SELECT user_id, item_key, attempted_at FROM buy_attempted")
+        ],
+        "user_stats": [
+            {
+                "user_id": int(r[0]),
+                "autobuy_ok": int(r[1] or 0),
+                "autobuy_fail": int(r[2] or 0),
+                "last_autobuy_error": str(r[3] or ""),
+                "last_autobuy_ok_ts": int(r[4] or 0),
+                "last_autobuy_item": str(r[5] or ""),
+            }
+            for r in await db_fetchall("SELECT user_id, autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item FROM user_stats")
+        ],
+    }
+    tmp = DATA_BACKUP_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, DATA_BACKUP_FILE)
+
+
+async def restore_from_backup_if_needed():
+    counts = await db_counts_snapshot()
+    if sum(counts.values()) > 0:
+        return False
+    if not os.path.exists(DATA_BACKUP_FILE):
+        return False
+
+    with open(DATA_BACKUP_FILE, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    users = payload.get("users") or []
+    urls = payload.get("urls") or []
+    seen_rows = payload.get("seen") or []
+    buy_rows = payload.get("buy_attempted") or []
+    stats_rows = payload.get("user_stats") or []
+
+    if users:
+        await db_executemany(
+            "INSERT OR REPLACE INTO users(user_id, role, allowed, last_error_report, last_request_ts) VALUES (?, ?, ?, ?, ?)",
+            [
+                (int(u["user_id"]), str(u.get("role") or "unknown"), int(u.get("allowed") or 0), int(u.get("last_error_report") or 0), int(u.get("last_request_ts") or 0))
+                for u in users
+            ],
+            commit=True,
+        )
+    if urls:
+        await db_executemany(
+            "INSERT OR REPLACE INTO urls(user_id, url, name, added_at, enabled, autobuy) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (int(r["user_id"]), str(r["url"]), str(r.get("name") or ""), int(r.get("added_at") or 0), int(r.get("enabled") or 0), int(r.get("autobuy") or 0))
+                for r in urls
+            ],
+            commit=True,
+        )
+    if seen_rows:
+        await db_executemany(
+            "INSERT OR REPLACE INTO seen(user_id, item_key, seen_at) VALUES (?, ?, ?)",
+            [(int(r["user_id"]), str(r["item_key"]), int(r.get("seen_at") or 0)) for r in seen_rows],
+            commit=True,
+        )
+    if buy_rows:
+        await db_executemany(
+            "INSERT OR REPLACE INTO buy_attempted(user_id, item_key, attempted_at) VALUES (?, ?, ?)",
+            [(int(r["user_id"]), str(r["item_key"]), int(r.get("attempted_at") or 0)) for r in buy_rows],
+            commit=True,
+        )
+    if stats_rows:
+        await db_executemany(
+            "INSERT OR REPLACE INTO user_stats(user_id, autobuy_ok, autobuy_fail, last_autobuy_error, last_autobuy_ok_ts, last_autobuy_item) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (int(r["user_id"]), int(r.get("autobuy_ok") or 0), int(r.get("autobuy_fail") or 0), str(r.get("last_autobuy_error") or ""), int(r.get("last_autobuy_ok_ts") or 0), str(r.get("last_autobuy_item") or ""))
+                for r in stats_rows
+            ],
+            commit=True,
+        )
+    return True
+
+
 # ====================== LOAD USER DATA ======================
 async def load_user_data(user_id: int, force: bool = False):
     if user_id in user_started and not force:
@@ -625,6 +827,7 @@ async def load_user_data(user_id: int, force: bool = False):
     user_urls[user_id] = await db_get_urls(user_id)
     user_seen_items[user_id] = await db_load_seen(user_id)
     user_buy_attempted[user_id] = await db_load_buy_attempted(user_id)
+    user_runtime_stats[user_id] = await db_get_user_stats(user_id)
     user_started.add(user_id)
 
 
@@ -643,6 +846,42 @@ async def user_hunter_interval(user_id: int) -> float:
     role = await get_user_role(user_id)
     extra = LIMITED_EXTRA_DELAY if role == "limited" else 0.0
     return HUNTER_INTERVAL_BASE + extra
+
+
+def fmt_ts(ts: int | float | None) -> str:
+    try:
+        if ts and float(ts) > 0:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts)))
+    except Exception:
+        pass
+    return "—"
+
+
+async def build_health_text(user_id: int) -> str:
+    await load_user_data(user_id)
+    task = user_hunter_tasks.get(user_id)
+    counts = await db_counts_snapshot()
+    backup_exists = os.path.exists(DATA_BACKUP_FILE)
+    backup_mtime = fmt_ts(os.path.getmtime(DATA_BACKUP_FILE)) if backup_exists else "—"
+    backup_size = os.path.getsize(DATA_BACKUP_FILE) if backup_exists else 0
+    db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
+    session_state = "open" if _global_session is not None and not _global_session.closed else "closed"
+    active_sources = await get_all_sources(user_id, enabled_only=True)
+    all_sources = await get_all_sources(user_id, enabled_only=False)
+
+    return (
+        "<b>🧪 Диагностика</b>\n"
+        f"• DB файл: <code>{html.escape(DB_FILE)}</code> ({db_size} bytes)\n"
+        f"• Backup: <code>{html.escape(DATA_BACKUP_FILE)}</code> | {'есть' if backup_exists else 'нет'} | {backup_size} bytes\n"
+        f"• Backup обновлён: <b>{html.escape(backup_mtime)}</b>\n"
+        f"• HTTP session: <b>{session_state}</b>\n"
+        f"• Hunter task: <b>{'alive' if task and not task.done() else 'stopped'}</b>\n"
+        f"• Охотник флаг: <b>{'ВКЛ' if user_search_active[user_id] else 'ВЫКЛ'}</b>\n"
+        f"• Активных URL: <b>{len(active_sources)}</b> / всего: <b>{len(all_sources)}</b>\n"
+        f"• Записей users/urls/seen/buy: <b>{counts['users']}/{counts['urls']}/{counts['seen']}/{counts['buy_attempted']}</b>\n"
+        f"• Seen в памяти: <b>{len(user_seen_items[user_id])}</b> | buy_attempted в памяти: <b>{len(user_buy_attempted[user_id])}</b>\n"
+        f"• API ошибок в памяти: <b>{user_api_errors.get(user_id, 0)}</b>"
+    )
 
 
 # ====================== URL VALIDATION/NORMALIZATION ======================
@@ -1273,6 +1512,29 @@ async def error_reporter_loop():
             await asyncio.sleep(ERROR_REPORT_INTERVAL)
 
 
+async def cleanup_loop():
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL)
+            await db_cleanup_old_history(SEEN_RETENTION_SECONDS)
+            for uid in list(user_started):
+                user_seen_items[uid] = await db_load_seen(uid)
+                user_buy_attempted[uid] = await db_load_buy_attempted(uid)
+        except Exception as e:
+            log_autobuy(f"CLEANUP_LOOP_EXC err='{_safe_compact(str(e),300)}'")
+            await asyncio.sleep(10)
+
+
+async def backup_loop():
+    while True:
+        try:
+            await asyncio.sleep(BACKUP_INTERVAL)
+            await write_backup_snapshot()
+        except Exception as e:
+            log_autobuy(f"BACKUP_LOOP_EXC err='{_safe_compact(str(e),300)}'")
+            await asyncio.sleep(10)
+
+
 # ====================== ACTIONS ======================
 async def show_denied(user_id: int, chat_id: int):
     await send_screen(chat_id, user_id, DENIED_TEXT, reply_markup=kb_request())
@@ -1285,6 +1547,8 @@ async def show_status(user_id: int, chat_id: int):
     all_sources = await get_all_sources(user_id, enabled_only=False)
     enabled_sources = [s for s in all_sources if s.get("enabled", True)]
     ab = sum(1 for s in all_sources if s.get("autobuy", False))
+    stats = await db_get_user_stats(user_id)
+    user_runtime_stats[user_id] = stats
 
     text = (
         "<b>📊 Статус</b>\n"
@@ -1293,11 +1557,16 @@ async def show_status(user_id: int, chat_id: int):
         f"• URL: <b>{len(enabled_sources)}/{len(all_sources)}</b> (автобай: <b>{ab}</b>)\n"
         f"• Увидено: <b>{len(user_seen_items[user_id])}</b>\n"
         f"• Попыток автобая: <b>{len(user_buy_attempted[user_id])}</b>\n"
+        f"• Успешных автобаев: <b>{stats['autobuy_ok']}</b>\n"
+        f"• Неуспешных автобаев: <b>{stats['autobuy_fail']}</b>\n"
+        f"• Последний успешный лот: <b>{html.escape(stats['last_autobuy_item'] or '—')}</b>\n"
+        f"• Последний успех: <b>{html.escape(fmt_ts(stats['last_autobuy_ok_ts']))}</b>\n"
+        f"• Последняя ошибка автобая: <b>{html.escape((stats['last_autobuy_error'] or '—')[:180])}</b>\n"
         f"• Ошибок API: <b>{user_api_errors.get(user_id, 0)}</b>\n"
+        f"• Backup: <code>{html.escape(DATA_BACKUP_FILE)}</code>\n"
         f"• Лог: <code>{html.escape(AUTOBUY_LOG_FILE)}</code>"
     )
     await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id), parse_mode="HTML")
-
 
 async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
     await load_user_data(user_id)
@@ -1455,7 +1724,12 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                         user_buy_attempted[user_id].add(key)
                         await db_mark_buy_attempted(user_id, key)
 
+                        item_desc = f"{src_name}#{item_id}"
                         if bought:
+                            await db_record_autobuy_result(user_id, True, item_desc=item_desc, error_text="")
+                            user_runtime_stats[user_id]["autobuy_ok"] += 1
+                            user_runtime_stats[user_id]["last_autobuy_ok_ts"] = int(time.time())
+                            user_runtime_stats[user_id]["last_autobuy_item"] = item_desc
                             dur_ms = int((time.perf_counter() - found_perf) * 1000)
                             buy_result_text = (
                                 f"🛒 <b>Автобай</b> ✅ [{html.escape(src_name)}] "
@@ -1507,6 +1781,19 @@ async def start_cmd(message: types.Message):
         await show_denied(user_id, message.chat.id)
 
     user_last_screen_msg_id[user_id] = None
+    await safe_delete(message)
+
+
+@dp.message(Command("health"))
+async def health_cmd(message: types.Message):
+    user_id = message.from_user.id
+    await load_user_data(user_id, force=True)
+    allowed = await db_is_allowed(user_id)
+    if not allowed and user_id not in OWNER_IDS:
+        await show_denied(user_id, message.chat.id)
+        return await safe_delete(message)
+
+    await send_screen(message.chat.id, user_id, await build_health_text(user_id), reply_markup=kb_main(user_id), parse_mode="HTML")
     await safe_delete(message)
 
 
@@ -1743,10 +2030,15 @@ async def buttons_handler(message: types.Message):
                 "ℹ️ Управление только нижними кнопками.\n"
                 "📚 Мои URL → управление источниками.\n"
                 "🚀 Старт охотника → уведомления о новых лотах.\n"
-                "🛒 Автобай включается по конкретному URL.\n\n"
+                "🛒 Автобай включается по конкретному URL.\n"
+                "🧪 Диагностика или /health → быстрый техстатус.\n\n"
                 f"🧾 Лог автобая: {AUTOBUY_LOG_FILE}",
                 reply_markup=kb_main(user_id),
             )
+            return await safe_delete(message)
+
+        if text == "🧪 Диагностика":
+            await send_screen(chat_id, user_id, await build_health_text(user_id), reply_markup=kb_main(user_id), parse_mode="HTML")
             return await safe_delete(message)
 
         if text == "📊 Статус":
@@ -1897,11 +2189,22 @@ async def main():
     bot = Bot(token=API_TOKEN)
 
     await init_db()
+    restored = await restore_from_backup_if_needed()
+    if restored:
+        log_autobuy("BACKUP_RESTORE_OK")
+    await write_backup_snapshot()
+
     asyncio.create_task(error_reporter_loop())
+    asyncio.create_task(cleanup_loop())
+    asyncio.create_task(backup_loop())
 
     try:
         await dp.start_polling(bot)
     finally:
+        try:
+            await write_backup_snapshot()
+        except Exception:
+            pass
         await close_session()
         await db_close()
         if bot is not None and getattr(bot, "session", None) is not None and not bot.session.closed:
