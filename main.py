@@ -60,6 +60,8 @@ SUPER_HUNTER_INTERVAL = 0.02
 AUTOBUY_SUPER_RETRY_ATTEMPTS = 2
 AUTOBUY_SUPER_RETRY_MIN_DELAY = 0.02
 AUTOBUY_SUPER_RETRY_MAX_DELAY = 0.05
+BALANCE_CACHE_TTL = 60
+BUY_BALANCE_KEYWORDS = ("account", "accounts", "market", "purchase", "buy", "аккаунт", "аккаунтов", "маркет", "покуп")
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -268,6 +270,7 @@ user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
 buy_semaphore = asyncio.Semaphore(3)
+selected_balance_cache = {"ts": 0.0, "id": None, "name": None, "raw": None}
 
 
 def get_buy_lock(item_key: str) -> asyncio.Lock:
@@ -872,6 +875,116 @@ async def iter_sources_results(user_id: int):
                 t.cancel()
 
 
+
+
+def _walk_json(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_json(v)
+    elif isinstance(obj, list):
+        for x in obj:
+            yield from _walk_json(x)
+
+
+def _balance_candidate_from_obj(obj: dict):
+    keys_id = ("balance_id", "id", "wallet_id")
+    keys_name = ("title", "name", "balance_name", "wallet_name", "currency")
+    bid = next((obj.get(k) for k in keys_id if obj.get(k) is not None), None)
+    bname = next((obj.get(k) for k in keys_name if obj.get(k) is not None), None)
+    if bid is None or bname is None:
+        return None
+    return {"id": bid, "name": str(bname)}
+
+
+async def fetch_balance_info(force: bool = False):
+    now = time.time()
+    if not force and selected_balance_cache.get("ts") and now - float(selected_balance_cache["ts"]) < BALANCE_CACHE_TTL:
+        return selected_balance_cache
+
+    cache = {"ts": now, "id": None, "name": None, "raw": None}
+    if not LZT_API_KEY:
+        selected_balance_cache.update(cache)
+        return selected_balance_cache
+
+    headers = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
+    try:
+        session = await get_session()
+        async with session.get("https://prod-api.lzt.market/balance/exchange", headers=headers, timeout=FETCH_TIMEOUT) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                selected_balance_cache.update(cache)
+                return selected_balance_cache
+            try:
+                data = json.loads(text)
+            except Exception:
+                selected_balance_cache.update(cache)
+                return selected_balance_cache
+
+            best = None
+            fallback = None
+            for obj in _walk_json(data):
+                cand = _balance_candidate_from_obj(obj)
+                if not cand:
+                    continue
+                if fallback is None:
+                    fallback = cand
+                low = cand["name"].lower()
+                if any(k in low for k in BUY_BALANCE_KEYWORDS):
+                    best = cand
+                    break
+
+            picked = best or fallback
+            cache["raw"] = data
+            if picked:
+                cache["id"] = picked["id"]
+                cache["name"] = picked["name"]
+    except Exception:
+        pass
+
+    selected_balance_cache.update(cache)
+    return selected_balance_cache
+
+
+async def get_preferred_buy_balance_id(force: bool = False):
+    env_id = (os.getenv("LZT_BALANCE_ID") or "").strip()
+    if env_id:
+        return env_id, "env"
+    info = await fetch_balance_info(force=force)
+    return info.get("id"), info.get("name")
+
+
+async def _autobuy_three_step_purchase(item_id: int, price, headers_json: dict, balance_id=None):
+    session = await get_session()
+    base = "https://prod-api.lzt.market"
+    reserve_payload = {}
+    if price is not None:
+        reserve_payload["price"] = price
+    if balance_id is not None:
+        reserve_payload["balance_id"] = balance_id
+
+    async with session.post(f"{base}/{item_id}/reserve", headers=headers_json, json=reserve_payload, timeout=BUY_TIMEOUT) as r1:
+        t1 = await r1.text()
+        st1, info1, _ = _autobuy_classify_response(r1.status, t1)
+        if st1 not in ("success",):
+            return False, f"reserve -> HTTP {r1.status}: {info1}"
+
+    async with session.post(f"{base}/{item_id}/check-account", headers=headers_json, json={}, timeout=BUY_TIMEOUT) as r2:
+        t2 = await r2.text()
+        st2, info2, _ = _autobuy_classify_response(r2.status, t2)
+        if st2 not in ("success",):
+            return False, f"check-account -> HTTP {r2.status}: {info2}"
+
+    confirm_payload = {}
+    if balance_id is not None:
+        confirm_payload["balance_id"] = balance_id
+    async with session.post(f"{base}/{item_id}/confirm-buy", headers=headers_json, json=confirm_payload, timeout=BUY_TIMEOUT) as r3:
+        t3 = await r3.text()
+        st3, info3, _ = _autobuy_classify_response(r3.status, t3)
+        if st3 == "success":
+            return True, f"confirm-buy -> {info3}"
+        return False, f"confirm-buy -> HTTP {r3.status}: {info3}"
+
 # ====================== DISPLAY ======================
 def make_card(item: dict, source_name: str) -> str:
     title = str(item.get("title", "Без названия"))
@@ -971,11 +1084,13 @@ def make_card(item: dict, source_name: str) -> str:
 
 
 # ====================== AUTOBUY ======================
-def _autobuy_payload_variants(item: dict):
+def _autobuy_payload_variants(item: dict, balance_id=None):
     price = item.get("price")
     payload = {}
     if price is not None:
         payload.update({"price": price, "item_price": price, "amount": price})
+    if balance_id is not None:
+        payload["balance_id"] = balance_id
 
     if LZT_SECRET_WORD:
         payload.update({
@@ -995,7 +1110,7 @@ def _autobuy_payload_variants(item: dict):
     dedup = []
     seen = set()
     for var in variants:
-        frozen = tuple(sorted(var.items()))
+        frozen = tuple(sorted(var.items(), key=lambda x: x[0]))
         if frozen in seen:
             continue
         seen.add(frozen)
@@ -1111,11 +1226,49 @@ def _autobuy_classify_response(status: int, text: str):
     terminal_error_markers = (
         "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
-        "forbidden", "access denied",
+    )
+    queue_markers = (
+        "очереди на автоматическую покупку",
+        "очередь на автоматическую покупку",
+        "automatic purchase queue",
+        "try again later",
+        "повторите позднее",
+    )
+    upgrade_markers = (
+        "account/upgrades",
+        "автоматической покупкой на маркете",
+        "данный аккаунт покупается автоматической покупкой",
+        "purchase it in account upgrades",
+    )
+    auth_markers = (
+        "access token",
+        "invalid token",
+        "scope market",
+        "unauthorized",
+        "authorization",
     )
 
     if status in (404, 405):
         return "retry", raw[:220], False
+    if status in (200, 201, 202):
+        return "success", raw[:220], False
+    if status == 415:
+        return "retry", raw[:220], True
+    if status == 400 and any(x in joined for x in ("invalid json", "unsupported media", "content-type")):
+        return "retry", raw[:220], True
+    if any(marker in joined for marker in queue_markers):
+        return "queue", raw[:220], False
+    if any(marker in joined for marker in upgrade_markers):
+        return "upgrade_required", raw[:220], False
+    if status == 401 or (status == 403 and any(marker in joined for marker in auth_markers)):
+        return "auth", raw[:220], False
+    if "secret" in joined or "answer" in joined or "секрет" in joined:
+        return "secret", raw[:220], False
+    if any(marker in joined for marker in success_markers):
+        return "success", raw[:220], False
+    if any(marker in joined for marker in terminal_error_markers):
+        return "terminal", raw[:220], False
+    return "retry", raw[:220], False
     if status in (200, 201, 202):
         return "success", raw[:220], False
     if status in (401, 403):
@@ -1152,7 +1305,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     source_url = (source.get("url") or "").strip()
     headers_json = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json", "Content-Type": "application/json"}
     headers_form = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
-    payload_variants = _autobuy_payload_variants(item)
+    balance_id, balance_name = await get_preferred_buy_balance_id()
+    payload_variants = _autobuy_payload_variants(item, balance_id=balance_id)
     buy_urls = _autobuy_prioritized_urls(source_url, item_id)
 
     since_found_ms = None
@@ -1161,7 +1315,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} urls={len(buy_urls)} payloads={len(payload_variants)}"
+        f"since_found_ms={since_found_ms} urls={len(buy_urls)} payloads={len(payload_variants)} balance_id={balance_id} balance_name={_safe_compact(str(balance_name),60)}"
     )
 
     last_err = "unknown"
@@ -1185,13 +1339,23 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                         if state == "success":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return True, f"{buy_url} -> {info}"
+                        if state == "upgrade_required":
+                            log_autobuy(f"BUY_FALLBACK_3STEP item_id={item_id} reason=upgrade_required buy_url={buy_url}")
+                            bought3, info3 = await _autobuy_three_step_purchase(item_id, item.get("price"), headers_json, balance_id=balance_id)
+                            if bought3:
+                                return True, f"3-step -> {info3}"
+                            last_err = f"3-step -> {info3}"
+                            continue
                         if state == "auth":
-                            return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
+                            return False, f"{buy_url} -> HTTP {resp.status}: проверь API ключ / scope market ({info})"
                         if state == "secret":
                             return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
                         if state == "terminal":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return False, f"{buy_url} -> {info}"
+                        if state == "queue":
+                            last_err = f"{buy_url} -> очередь автопокупки ({info})"
+                            continue
 
                         last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
                         need_form_retry = retry_as_form
@@ -1220,13 +1384,23 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                         if state == "success":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return True, f"{buy_url} (form) -> {info}"
+                        if state == "upgrade_required":
+                            log_autobuy(f"BUY_FALLBACK_3STEP_FORM item_id={item_id} reason=upgrade_required buy_url={buy_url}")
+                            bought3, info3 = await _autobuy_three_step_purchase(item_id, item.get("price"), headers_json, balance_id=balance_id)
+                            if bought3:
+                                return True, f"3-step -> {info3}"
+                            last_err = f"3-step -> {info3}"
+                            continue
                         if state == "auth":
-                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
+                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверь API ключ / scope market ({info})"
                         if state == "secret":
                             return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
                         if state == "terminal":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return False, f"{buy_url} (form) -> {info}"
+                        if state == "queue":
+                            last_err = f"{buy_url} (form) -> очередь автопокупки ({info})"
+                            continue
 
                         last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
 
@@ -1260,8 +1434,9 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
             low = (info or "").lower()
             terminal = any(x in low for x in [
                 "недостаточно", "already sold", "already purchased", "already bought",
-                "уже продан", "нельзя купить", "secret", "auth", "401", "403",
-            ])
+                "уже продан", "нельзя купить", "secret", "auth", "401",
+                "scope market", "api ключ", "секретный вопрос", "account/upgrades"
+            ]) and "очередь автопокупки" not in low
             if terminal:
                 return False, f"attempt={attempt}/{attempts} | {info}"
 
@@ -1307,6 +1482,7 @@ async def show_status(user_id: int, chat_id: int):
     enabled_sources = [s for s in all_sources if s.get("enabled", True)]
     ab = sum(1 for s in all_sources if s.get("autobuy", False))
     interval = await user_hunter_interval(user_id)
+    balance_id, balance_name = await get_preferred_buy_balance_id()
 
     mode_label = {"off": "ВЫКЛ", "classic": "КЛАССИЧЕСКИЙ", "super": "СУПЕР"}.get(mode, mode.upper())
 
