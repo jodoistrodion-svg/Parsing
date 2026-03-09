@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import aiohttp
@@ -60,9 +61,6 @@ SUPER_HUNTER_INTERVAL = 0.02
 AUTOBUY_SUPER_RETRY_ATTEMPTS = 2
 AUTOBUY_SUPER_RETRY_MIN_DELAY = 0.02
 AUTOBUY_SUPER_RETRY_MAX_DELAY = 0.05
-MAX_RETRY_REQUEST_REPEATS = 6
-
-PURCHASE_API_BASE = "https://prod-api.lzt.market"
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -252,7 +250,7 @@ def parse_index_from_button(text: str) -> int | None:
 
 # ====================== STATE ======================
 user_search_active = defaultdict(lambda: False)
-user_hunter_mode = defaultdict(lambda: "off")
+user_hunter_mode = defaultdict(lambda: "off")  # off/classic/super
 user_seen_items = defaultdict(set)
 user_buy_attempted = defaultdict(set)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
@@ -268,6 +266,7 @@ user_pending_url = defaultdict(lambda: None)
 user_pending_rename_url = defaultdict(lambda: None)
 user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
+autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
 buy_semaphore = asyncio.Semaphore(3)
 
@@ -425,7 +424,7 @@ async def db_executemany(query: str, params_seq, commit: bool = False):
         return cur
 
 
-async def db_fetchone(query: str, params: tuple = ()): 
+async def db_fetchone(query: str, params: tuple = ()):
     db = await db_conn()
     async with _db_lock:
         cur = await db.execute(query, params)
@@ -976,7 +975,6 @@ def make_card(item: dict, source_name: str) -> str:
 def _autobuy_payload_variants(item: dict):
     price = item.get("price")
     payload = {"balance_id": LZT_BALANCE_ID}
-
     if price is not None:
         payload.update({"price": price, "item_price": price, "amount": price})
 
@@ -1006,97 +1004,135 @@ def _autobuy_payload_variants(item: dict):
     return dedup
 
 
-def _json_joined(text: str) -> str:
+def _autobuy_buy_urls(source_url: str, item_id: int):
+    source_url = (source_url or "").strip()
+    source_base = ""
+    try:
+        parts = urlsplit(source_url)
+        if parts.scheme and parts.netloc:
+            source_base = f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        source_base = ""
+
+    base_hosts = ["https://prod-api.lzt.market"]
+    if "api.lolz.live" in source_url.lower():
+        base_hosts.append("https://api.lolz.live")
+    if source_base:
+        base_hosts.append(source_base)
+    base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
+
+    dedup_bases = []
+    seen_bases = set()
+    for base in base_hosts:
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        dedup_bases.append(base)
+
+    fast_paths = ["{id}/fast-buy", "{id}/buy", "item/{id}/fast-buy", "item/{id}/buy"]
+    slow_paths = [
+        "{id}/purchase",
+        "market/{id}/fast-buy",
+        "market/{id}/buy",
+        "market/{id}/purchase",
+        "item/{id}/purchase",
+        "items/{id}/buy",
+        "items/{id}/fast-buy",
+        "items/{id}/purchase",
+    ]
+
+    urls = []
+    seen = set()
+    for path_list in (fast_paths, slow_paths):
+        for base in dedup_bases:
+            for tpl in path_list:
+                url = f"{base}/{tpl.format(id=item_id)}"
+                if url in seen:
+                    continue
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _autobuy_cache_key(source_url: str) -> str:
+    try:
+        p = urlsplit(source_url or "")
+        if p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+    except Exception:
+        pass
+    return (source_url or "").strip().lower() or "default"
+
+
+def _autobuy_prioritized_urls(source_url: str, item_id: int):
+    all_urls = _autobuy_buy_urls(source_url, item_id)
+    cache_key = _autobuy_cache_key(source_url)
+    preferred = autobuy_endpoint_cache.get(cache_key, [])
+    if preferred:
+        pref_item_urls = [tpl.format(id=item_id) for tpl in preferred]
+        ordered = []
+        seen = set()
+        for u in pref_item_urls + all_urls:
+            if u in seen:
+                continue
+            seen.add(u)
+            ordered.append(u)
+        return ordered
+    return all_urls
+
+
+def _remember_autobuy_endpoint(source_url: str, used_url: str):
+    cache_key = _autobuy_cache_key(source_url)
+    try:
+        parts = urlsplit(used_url)
+        path = parts.path.lstrip("/")
+        item_id_match = re.search(r"/(\d+)(?:/|$)", "/" + path)
+        if not item_id_match:
+            return
+        item_id_str = item_id_match.group(1)
+        template_path = path.replace(item_id_str, "{id}", 1)
+        template_url = f"{parts.scheme}://{parts.netloc}/{template_path}"
+        current = autobuy_endpoint_cache.get(cache_key, [])
+        current = [template_url] + [u for u in current if u != template_url]
+        autobuy_endpoint_cache[cache_key] = current[:3]
+    except Exception:
+        pass
+
+
+def _autobuy_classify_response(status: int, text: str):
     raw = html.unescape(text or "")
+    lower = raw.lower()
     try:
         data = json.loads(raw)
-        return json.dumps(data, ensure_ascii=False).lower()
+        joined = json.dumps(data, ensure_ascii=False).lower()
     except Exception:
-        return raw.lower()
+        joined = lower
 
+    success_markers = ("success", "ok", "purchased", "purchase complete", "already bought", "уже куп")
+    terminal_error_markers = (
+        "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
+        "already purchased", "already bought", "цена изменилась", "нельзя купить",
+        "forbidden", "access denied",
+    )
 
-def _contains_retry_request(text: str) -> bool:
-    joined = _json_joined(text)
-    return "retry_request" in joined
-
-
-def _classify_buy_response(status: int, text: str) -> str:
-    joined = _json_joined(text)
-    if status in (200, 201, 202):
-        return "success"
-    if _contains_retry_request(text):
-        return "retry_request"
-    if "недостаточно средств" in joined or "insufficient" in joined:
-        return "insufficient"
-    if "секрет" in joined or "secret" in joined:
-        return "secret"
-    if "already sold" in joined or "уже продан" in joined or "цена изменилась" in joined:
-        return "terminal"
-    if status in (401, 403):
-        return "auth"
     if status in (404, 405):
-        return "not_found"
-    return "retry"
+        return "retry", raw[:220], False
+    if status in (200, 201, 202):
+        return "success", raw[:220], False
+    if status in (401, 403):
+        return "auth", raw[:220], False
+    if status == 415:
+        return "retry", raw[:220], True
+    if status == 400 and any(x in joined for x in ("invalid json", "unsupported media", "content-type")):
+        return "retry", raw[:220], True
 
-
-async def _post_json_or_form(session: aiohttp.ClientSession, url: str, payload: dict):
-    headers_json = {
-        "Authorization": f"Bearer {LZT_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    headers_form = {
-        "Authorization": f"Bearer {LZT_API_KEY}",
-        "Accept": "application/json",
-    }
-
-    try:
-        async with session.post(url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
-            text = await resp.text()
-            if resp.status == 415 or (resp.status == 400 and any(x in _json_joined(text) for x in ("content-type", "unsupported media", "invalid json"))):
-                async with session.post(url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as resp2:
-                    return resp2.status, await resp2.text(), True
-            return resp.status, text, False
-    except asyncio.TimeoutError:
-        return 0, "buy_timeout", False
-
-
-async def _fast_buy(session: aiohttp.ClientSession, item_id: int, payload: dict):
-    url = f"{PURCHASE_API_BASE}/{item_id}/fast-buy"
-    last_status, last_text = 0, "unknown"
-    for i in range(1, MAX_RETRY_REQUEST_REPEATS + 1):
-        status, text, used_form = await _post_json_or_form(session, url, payload)
-        last_status, last_text = status, text
-        state = _classify_buy_response(status, text)
-        log_autobuy(f"FAST_BUY item_id={item_id} try={i} status={status} form={int(used_form)} state={state} info='{_safe_compact(text, 220)}'")
-        if state == "retry_request":
-            await asyncio.sleep(0.05 if i < 3 else 0.12)
-            continue
-        return state, status, text
-    return _classify_buy_response(last_status, last_text), last_status, last_text
-
-
-async def _check_then_confirm(session: aiohttp.ClientSession, item_id: int, payload: dict):
-    check_url = f"{PURCHASE_API_BASE}/{item_id}/check-account"
-    confirm_url = f"{PURCHASE_API_BASE}/{item_id}/confirm-buy"
-
-    last_status, last_text = 0, "unknown"
-    for i in range(1, MAX_RETRY_REQUEST_REPEATS + 1):
-        status, text, used_form = await _post_json_or_form(session, check_url, payload)
-        last_status, last_text = status, text
-        state = _classify_buy_response(status, text)
-        log_autobuy(f"CHECK_ACCOUNT item_id={item_id} try={i} status={status} form={int(used_form)} state={state} info='{_safe_compact(text, 220)}'")
-        if state == "retry_request":
-            await asyncio.sleep(0.05 if i < 3 else 0.12)
-            continue
-        if state != "success":
-            return state, status, text
-        break
-
-    status, text, used_form = await _post_json_or_form(session, confirm_url, payload)
-    state = _classify_buy_response(status, text)
-    log_autobuy(f"CONFIRM_BUY item_id={item_id} status={status} form={int(used_form)} state={state} info='{_safe_compact(text, 220)}'")
-    return state, status, text
+    if "secret" in joined or "answer" in joined or "секрет" in joined:
+        return "secret", raw[:220], False
+    if any(marker in joined for marker in success_markers):
+        return "success", raw[:220], False
+    if any(marker in joined for marker in terminal_error_markers):
+        return "terminal", raw[:220], False
+    return "retry", raw[:220], False
 
 
 async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
@@ -1114,37 +1150,93 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     t0 = time.perf_counter()
     source_name = (source.get("name") or "UNKNOWN").strip()
+    source_url = (source.get("url") or "").strip()
+    headers_json = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json", "Content-Type": "application/json"}
+    headers_form = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
     payload_variants = _autobuy_payload_variants(item)
+    buy_urls = _autobuy_prioritized_urls(source_url, item_id)
 
     since_found_ms = None
     if found_perf is not None:
         since_found_ms = int((t0 - found_perf) * 1000)
 
     log_autobuy(
-        f"BUY_START item_id={item_id} balance_id={LZT_BALANCE_ID} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} payloads={len(payload_variants)}"
+        f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
+        f"since_found_ms={since_found_ms} urls={len(buy_urls)} payloads={len(payload_variants)}"
     )
 
-    session = await get_session()
     last_err = "unknown"
+    session = await get_session()
 
     async with buy_semaphore:
-        for payload_idx, payload in enumerate(payload_variants, start=1):
-            state, status, text = await _fast_buy(session, item_id, payload)
-            info = _safe_compact(text, 300)
-            if state == "success":
-                return True, f"fast-buy -> {info}"
-            if state in {"insufficient", "secret", "terminal", "auth"}:
-                return False, f"fast-buy -> HTTP {status}: {info}"
+        for buy_url in buy_urls:
+            for payload_idx, payload in enumerate(payload_variants, start=1):
+                need_form_retry = False
+                try:
+                    async with session.post(buy_url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
+                        body = await resp.text()
+                        state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
 
-            # fallback only if fast-buy didn't finish cleanly
-            state2, status2, text2 = await _check_then_confirm(session, item_id, payload)
-            info2 = _safe_compact(text2, 300)
-            if state2 == "success":
-                return True, f"check-account/confirm-buy -> {info2}"
-            last_err = f"payload#{payload_idx} check-account/confirm-buy -> HTTP {status2}: {info2}"
-            if state2 in {"insufficient", "secret", "terminal", "auth"}:
-                return False, last_err
+                        if resp.status not in (404, 405):
+                            log_autobuy(
+                                f"BUY_TRY item_id={item_id} payload={payload_idx} status={resp.status} "
+                                f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                            )
+
+                        if state == "success":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            return True, f"{buy_url} -> {info}"
+                        if state == "auth":
+                            return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
+                        if state == "secret":
+                            return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                        if state == "terminal":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            return False, f"{buy_url} -> {info}"
+
+                        last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
+                        need_form_retry = retry_as_form
+
+                except asyncio.TimeoutError:
+                    last_err = f"{buy_url} -> buy_timeout"
+                    continue
+                except Exception as e:
+                    last_err = f"{buy_url} -> {e}"
+                    continue
+
+                if not need_form_retry:
+                    continue
+
+                try:
+                    async with session.post(buy_url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as form_resp:
+                        form_body = await form_resp.text()
+                        state, info, _ = _autobuy_classify_response(form_resp.status, form_body)
+
+                        if form_resp.status not in (404, 405):
+                            log_autobuy(
+                                f"BUY_TRY_FORM item_id={item_id} payload={payload_idx} status={form_resp.status} "
+                                f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                            )
+
+                        if state == "success":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            return True, f"{buy_url} (form) -> {info}"
+                        if state == "auth":
+                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
+                        if state == "secret":
+                            return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
+                        if state == "terminal":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            return False, f"{buy_url} (form) -> {info}"
+
+                        last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
+
+                except asyncio.TimeoutError:
+                    last_err = f"{buy_url} (form) -> buy_timeout"
+                    continue
+                except Exception as e:
+                    last_err = f"{buy_url} (form) -> {e}"
+                    continue
 
     return False, last_err
 
@@ -1164,22 +1256,22 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
             last_result = (bought, info)
 
             if bought:
-                return True, f"attempt={attempt}/{attempts} | balance_id={LZT_BALANCE_ID} | {info}"
+                return True, f"attempt={attempt}/{attempts} | {info}"
 
             low = (info or "").lower()
             terminal = any(x in low for x in [
                 "недостаточно", "already sold", "already purchased", "already bought",
-                "уже продан", "нельзя купить", "secret", "401", "403",
+                "уже продан", "нельзя купить", "secret", "auth", "401", "403",
             ])
             if terminal:
-                return False, f"attempt={attempt}/{attempts} | balance_id={LZT_BALANCE_ID} | {info}"
+                return False, f"attempt={attempt}/{attempts} | {info}"
 
             if attempt < attempts:
                 delay = random.uniform(min_delay, max_delay)
                 log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} super={int(super_mode)} attempt={attempt} sleep={delay:.3f}s")
                 await asyncio.sleep(delay)
 
-        return last_result[0], f"attempt={attempts}/{attempts} | balance_id={LZT_BALANCE_ID} | {last_result[1]}"
+        return last_result[0], f"attempt={attempts}/{attempts} | {last_result[1]}"
 
 
 # ====================== REPORTER ======================
@@ -1386,11 +1478,8 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     src_name = source.get("name") or "UNKNOWN"
 
                     buy_result_text = None
-                    should_buy = source.get("autobuy", False) or user_hunter_mode[user_id] == "super"
-                    if should_buy and key not in user_buy_attempted[user_id]:
-                        bought, buy_info = await try_autobuy_item(
-                            source, item, found_perf=found_perf, super_mode=(user_hunter_mode[user_id] == "super")
-                        )
+                    if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
+                        bought, buy_info = await try_autobuy_item(source, item, found_perf=found_perf)
                         user_buy_attempted[user_id].add(key)
                         await db_mark_buy_attempted(user_id, key)
 
@@ -1693,9 +1782,7 @@ async def buttons_handler(message: types.Message):
                 "📚 Мои URL → управление источниками.\n"
                 "🚀 Старт охотника → максимально быстрый классический режим.\n"
                 "⚡ Супер охотник → сверхагрессивный режим (0.02 сек + автобай по всем активным URL на время работы).\n"
-                "🛒 Обычный автобай включается по конкретному URL.\n"
-                f"💳 Покупочный balance_id: {LZT_BALANCE_ID}\n"
-                "📌 Покупка идёт через official fast-buy + fallback check-account/confirm-buy.\n\n"
+                "🛒 Обычный автобай включается по конкретному URL.\n\n"
                 f"🧾 Лог автобая: {AUTOBUY_LOG_FILE}",
                 reply_markup=kb_main(user_id),
             )
@@ -1743,11 +1830,11 @@ async def buttons_handler(message: types.Message):
                 user_hunter_tasks[user_id] = task
 
                 if requested_mode == "super":
-                    log_autobuy(f"SUPER_HUNTER_START user_id={user_id} active_urls={len(active_sources)} interval={SUPER_HUNTER_INTERVAL} balance_id={LZT_BALANCE_ID}")
-                    await send_screen(chat_id, user_id, f"⚡ Супер охотник запущен! Активных URL: {len(active_sources)}\nАвтобай временно включён для всех активных URL.\nИнтервал цикла: {SUPER_HUNTER_INTERVAL:.2f} сек\nBalance ID: {LZT_BALANCE_ID}", reply_markup=kb_main(user_id))
+                    log_autobuy(f"SUPER_HUNTER_START user_id={user_id} active_urls={len(active_sources)} interval={SUPER_HUNTER_INTERVAL}")
+                    await send_screen(chat_id, user_id, f"⚡ Супер охотник запущен! Активных URL: {len(active_sources)}\nАвтобай временно включён для всех активных URL.\nИнтервал цикла: {SUPER_HUNTER_INTERVAL:.2f} сек", reply_markup=kb_main(user_id))
                 else:
-                    log_autobuy(f"HUNTER_START user_id={user_id} active_urls={len(active_sources)} interval={HUNTER_INTERVAL_BASE} balance_id={LZT_BALANCE_ID}")
-                    await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}\nИнтервал цикла: {HUNTER_INTERVAL_BASE:.2f} сек\nBalance ID: {LZT_BALANCE_ID}", reply_markup=kb_main(user_id))
+                    log_autobuy(f"HUNTER_START user_id={user_id} active_urls={len(active_sources)} interval={HUNTER_INTERVAL_BASE}")
+                    await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}\nИнтервал цикла: {HUNTER_INTERVAL_BASE:.2f} сек", reply_markup=kb_main(user_id))
                 return await safe_delete(message)
 
         if text == "🛑 Стоп охотника":
@@ -1848,7 +1935,7 @@ async def buttons_handler(message: types.Message):
 # ====================== RUN ======================
 async def main():
     global bot
-    print(f"[BOT] Start: classic+super hunter + official purchase endpoints + balance_id={LZT_BALANCE_ID}")
+    print(f"[BOT] Start: classic+super hunter + balance_id={LZT_BALANCE_ID}")
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
