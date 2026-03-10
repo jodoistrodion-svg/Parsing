@@ -8,7 +8,7 @@ import re
 import time
 import random
 import os
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
@@ -36,9 +36,9 @@ OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = 0.08
-FETCH_TIMEOUT = 5.40
+FETCH_TIMEOUT = 3.20
 BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "1.80").strip())
-RETRY_MAX = 2
+RETRY_MAX = 1
 RETRY_BASE_DELAY = 0.30
 
 SHORT_CARD_MAX = 950
@@ -47,8 +47,9 @@ ERROR_REPORT_INTERVAL = 3600
 MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
-MAX_CONCURRENT_REQUESTS = 10
+MAX_CONCURRENT_REQUESTS = 20
 LIMITED_EXTRA_DELAY = 3.0
+MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "20").strip())
 
 DB_FILE = "bot_data.sqlite"
 
@@ -57,12 +58,13 @@ LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
 URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
-TG_SEND_DELAY = 0.07
+TG_SEND_DELAY = 0.02
 AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
 AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.06").strip())
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.16").strip())
 FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.85").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "4").strip())
+MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "35").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -231,6 +233,61 @@ async def send_bot_message(chat_id: int, text: str, **kwargs):
                 await asyncio.sleep(0.6 + attempt * 0.5)
 
 
+def _get_notify_queue(user_id: int) -> asyncio.Queue:
+    q = user_notify_queues.get(user_id)
+    if q is None:
+        q = asyncio.Queue(maxsize=1500)
+        user_notify_queues[user_id] = q
+    return q
+
+
+async def _notify_worker_loop(user_id: int):
+    q = _get_notify_queue(user_id)
+    while user_search_active[user_id] or not q.empty():
+        try:
+            chat_id, text, kwargs = await asyncio.wait_for(q.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+        try:
+            await send_bot_message(chat_id, text, **kwargs)
+        except Exception as e:
+            log_autobuy(f"NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
+        finally:
+            q.task_done()
+
+
+def ensure_notify_worker(user_id: int):
+    task = user_notify_workers.get(user_id)
+    if task and not task.done():
+        return
+    user_notify_workers[user_id] = asyncio.create_task(_notify_worker_loop(user_id))
+
+
+def enqueue_hunter_notification(user_id: int, chat_id: int, text: str, **kwargs):
+    q = _get_notify_queue(user_id)
+    payload = (chat_id, text, kwargs)
+    try:
+        q.put_nowait(payload)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    dropped = 0
+    while q.full() and not q.empty() and dropped < 200:
+        try:
+            q.get_nowait()
+            q.task_done()
+            dropped += 1
+        except Exception:
+            break
+    try:
+        q.put_nowait(payload)
+    except Exception:
+        pass
+    if dropped:
+        log_autobuy(f"NOTIFY_QUEUE_DROP user_id={user_id} dropped={dropped}")
+
+
 def make_item_key(item: dict) -> str:
     iid = item.get("item_id") or item.get("id")
     if iid is not None:
@@ -258,6 +315,9 @@ user_buy_attempted = defaultdict(set)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 user_hunter_start_locks: dict[int, asyncio.Lock] = {}
 user_history_reset_pending = defaultdict(lambda: False)
+
+user_notify_queues: dict[int, asyncio.Queue] = {}
+user_notify_workers: dict[int, asyncio.Task] = {}
 
 user_modes = defaultdict(lambda: None)
 user_started = set()
@@ -626,6 +686,14 @@ async def db_mark_buy_attempted(user_id: int, key: str):
     )
 
 
+async def db_mark_buy_attempted_batch(user_id: int, keys: list[str]):
+    if not keys:
+        return
+    ts = int(time.time())
+    rows = [(user_id, k, ts) for k in keys]
+    await db_executemany("INSERT OR IGNORE INTO buy_attempted(user_id, item_key, attempted_at) VALUES (?, ?, ?)", rows, commit=True)
+
+
 async def db_load_buy_attempted(user_id: int):
     rows = await db_fetchall("SELECT item_key FROM buy_attempted WHERE user_id=?", (user_id,))
     return {r[0] for r in rows}
@@ -715,7 +783,33 @@ def normalize_url(url: str) -> str:
     query = query.replace("order_by=pdate_to_down_up", "order_by=pdate_to_down_upload")
     query = query.replace("order_by=pdate_to_downupload", "order_by=pdate_to_down_upload")
 
+    try:
+        query_pairs = parse_qsl(query, keep_blank_values=True)
+        qmap = {k: v for k, v in query_pairs}
+        if "order_by" not in qmap or not str(qmap.get("order_by", "")).strip():
+            query_pairs = [(k, v) for k, v in query_pairs if k != "order_by"]
+            query_pairs.append(("order_by", "pdate_to_down_upload"))
+            query = urlencode(query_pairs)
+    except Exception:
+        pass
+
     return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def _item_sort_key(item: dict) -> tuple[int, int]:
+    published_at = item.get("published_at") or item.get("created_at") or item.get("date") or item.get("time")
+    try:
+        ts = int(float(published_at))
+    except Exception:
+        ts = 0
+
+    item_id = item.get("item_id") or item.get("id")
+    try:
+        iid = int(item_id)
+    except Exception:
+        iid = 0
+
+    return ts, iid
 
 
 # ====================== HTTP / API ======================
@@ -727,7 +821,7 @@ async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT, connect=3, sock_connect=3, sock_read=FETCH_TIMEOUT)
-        connector = aiohttp.TCPConnector(limit=32, limit_per_host=16, ttl_dns_cache=300, enable_cleanup_closed=True)
+        connector = aiohttp.TCPConnector(limit=64, limit_per_host=32, ttl_dns_cache=300, enable_cleanup_closed=True)
         _global_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _global_session
 
@@ -1620,9 +1714,12 @@ async def seed_existing_without_notifications(user_id: int):
 
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
+    ensure_notify_worker(user_id)
 
     while user_search_active[user_id]:
         seen_batch = []
+        buy_attempt_batch = []
+        new_items_processed = 0
         try:
             async for source, items, err in iter_sources_results(user_id):
                 if err:
@@ -1631,7 +1728,14 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if not items:
                     continue
 
+                items = sorted(items, key=_item_sort_key, reverse=True)
+                if MAX_ITEMS_PER_SOURCE_SCAN > 0:
+                    items = items[:MAX_ITEMS_PER_SOURCE_SCAN]
+
                 for item in items:
+                    if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
+                        break
+
                     key = make_item_key(item)
                     if key in user_seen_items[user_id]:
                         continue
@@ -1644,7 +1748,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
                         bought, buy_info = await try_autobuy_item(source, item, found_perf=found_perf)
                         user_buy_attempted[user_id].add(key)
-                        await db_mark_buy_attempted(user_id, key)
+                        buy_attempt_batch.append(key)
 
                         if bought:
                             dur_ms = int((time.perf_counter() - found_perf) * 1000)
@@ -1664,14 +1768,17 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
                     user_seen_items[user_id].add(key)
                     seen_batch.append(key)
+                    new_items_processed += 1
 
-                    await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                    enqueue_hunter_notification(user_id, chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
                     if buy_result_text:
-                        if buy_result_text.startswith("🛒 <b>Автобай</b> ✅"):
-                            await send_bot_message(chat_id, "✅ <b>Куплено автобаем</b>\n" + make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
-                        await send_bot_message(chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
+                        enqueue_hunter_notification(user_id, chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
+
+                if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
+                    break
 
             await db_mark_seen_batch(user_id, seen_batch)
+            await db_mark_buy_attempted_batch(user_id, buy_attempt_batch)
             await asyncio.sleep(await user_hunter_interval(user_id))
 
         except asyncio.CancelledError:
@@ -1681,6 +1788,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             if seen_batch:
                 try:
                     await db_mark_seen_batch(user_id, seen_batch)
+                    await db_mark_buy_attempted_batch(user_id, buy_attempt_batch)
                 except Exception:
                     pass
             user_api_errors[user_id] += 1
