@@ -26,6 +26,10 @@ LZT_BALANCE_ID = int((os.getenv("LZT_BALANCE_ID") or "20212").strip())
 bot: Bot | None = None
 dp = Dispatcher()
 
+# balance cache
+user_balance_cache = defaultdict(lambda: {"text": "—", "ts": 0})
+BALANCE_CACHE_TTL = 60
+
 # ====================== OWNER / ACCESS ======================
 OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
@@ -795,6 +799,101 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
     return [], "❌ Не удалось получить ответ"
 
 
+
+
+def _format_money(v) -> str:
+    try:
+        return f"{float(v):,.2f}".replace(",", " ").replace(".00", "")
+    except Exception:
+        try:
+            return f"{int(v):,}".replace(",", " ")
+        except Exception:
+            return str(v)
+
+
+def _extract_account_buy_balance_text(data) -> str | None:
+    candidates = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            title = str(
+                obj.get("title")
+                or obj.get("name")
+                or obj.get("label")
+                or obj.get("description")
+                or ""
+            ).strip()
+            oid = obj.get("id")
+            amount = obj.get("amount")
+            balance = obj.get("balance")
+            value = amount if amount is not None else balance
+            if title:
+                candidates.append((title, oid, value))
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                walk(x)
+
+    walk(data)
+
+    for title, oid, value in candidates:
+        low = title.lower()
+        if "баланс для покупки аккаунтов" in low or "buy account" in low or "purchase account" in low:
+            parts = [title]
+            if oid is not None:
+                parts.append(f"ID {oid}")
+            if value is not None:
+                parts.append(f"{_format_money(value)} ₽")
+            return " • ".join(parts)
+
+    for title, oid, value in candidates:
+        if oid == LZT_BALANCE_ID:
+            parts = [title]
+            if oid is not None:
+                parts.append(f"ID {oid}")
+            if value is not None:
+                parts.append(f"{_format_money(value)} ₽")
+            return " • ".join(parts)
+
+    return None
+
+
+async def get_account_buy_balance_text(force: bool = False) -> str:
+    cache = user_balance_cache[0]
+    now = time.time()
+    if not force and cache["text"] != "—" and now - cache["ts"] < BALANCE_CACHE_TTL:
+        return cache["text"]
+
+    if not LZT_API_KEY:
+        return "—"
+
+    headers = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
+    urls = [
+        "https://prod-api.lzt.market/balance/exchange",
+        "https://api.lzt.market/balance/exchange",
+    ]
+
+    session = await get_session()
+    for url in urls:
+        try:
+            async with session.get(url, headers=headers, timeout=FETCH_TIMEOUT) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    continue
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    continue
+                parsed = _extract_account_buy_balance_text(data)
+                if parsed:
+                    user_balance_cache[0] = {"text": parsed, "ts": now}
+                    return parsed
+        except Exception:
+            continue
+
+    return cache["text"] if cache["text"] != "—" else "—"
+
 # ====================== SOURCES ======================
 async def get_all_sources(user_id: int, enabled_only: bool = False):
     await load_user_data(user_id)
@@ -914,60 +1013,63 @@ def make_card(item: dict, source_name: str) -> str:
             pass
         return str(x) if x is not None else None
 
-    src = html.escape(str(source_name or "Источник"))
-    ttl = html.escape(title)
-    iid = html.escape(str(item_id)) if item_id is not None else "—"
+    link = direct_url or (f"https://lzt.market/{item_id}" if item_id is not None else None)
 
-    lines = [
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"🔎 <b>{src}</b>",
-        f"🎮 <b>{ttl}</b>",
-        f"🆔 <code>{iid}</code>",
-    ]
+    lines = []
+    lines.append("╔════════════════════╗")
+    lines.append(f"🎯 <b>{html.escape(title)}</b>")
+    lines.append(f"📦 Источник: <b>{html.escape(str(source_name or 'Источник'))}</b>")
 
-    meta = []
-    if category:
-        meta.append(f"🏷 {html.escape(str(category))}")
-    if seller_id is not None:
-        meta.append(f"👤 seller: <code>{html.escape(str(seller_id))}</code>")
-    if views is not None:
-        meta.append(f"👁 {html.escape(_fmt_int(views))}")
-    if likes is not None:
-        meta.append(f"⭐ {html.escape(_fmt_int(likes))}")
-    if published_at is not None:
-        meta.append(f"🕒 {html.escape(_fmt_time(published_at))}")
-    if meta:
-        lines.append(" • ".join(meta))
-
-    if level is not None:
-        lines.append(f"🔼 Уровень: <b>{html.escape(_fmt_int(level))}</b>")
-    if trophies is not None:
-        lines.append(f"🏆 Кубков: <b>{html.escape(_fmt_int(trophies))}</b>")
-    if townhall is not None:
-        lines.append(f"🏰 Ратуша: <b>{html.escape(_fmt_int(townhall))}</b>")
-    if phone_bound is not None:
-        lines.append(f"📱 Телефон привязан: <b>{'Да' if phone_bound else 'Нет'}</b>")
-
+    main_meta = []
     if price is not None and price != "—":
-        lines.append(f"💰 Цена: <b>{html.escape(_fmt_int(price))} ₽</b>")
-    else:
-        lines.append("💰 Цена: <b>—</b>")
+        main_meta.append(f"💰 <b>{html.escape(_fmt_int(price))} ₽</b>")
+    if category:
+        main_meta.append(f"🏷 {html.escape(str(category))}")
+    if item_id is not None:
+        main_meta.append(f"🆔 <code>{html.escape(str(item_id))}</code>")
+    if main_meta:
+        lines.append(" • ".join(main_meta))
 
-    if direct_url:
-        lines.append(f"🔗 {html.escape(str(direct_url))}")
-    elif item_id is not None:
-        lines.append(f"🔗 https://lzt.market/{html.escape(str(item_id))}")
+    extra_meta = []
+    if trophies is not None:
+        extra_meta.append(f"🏆 {html.escape(_fmt_int(trophies))}")
+    if level is not None:
+        extra_meta.append(f"🔼 {html.escape(_fmt_int(level))}")
+    if townhall is not None:
+        extra_meta.append(f"🏰 {html.escape(_fmt_int(townhall))}")
+    if phone_bound is not None:
+        extra_meta.append(f"📱 {'Да' if phone_bound else 'Нет'}")
+    if extra_meta:
+        lines.append(" • ".join(extra_meta))
+
+    stats = []
+    if seller_id is not None:
+        stats.append(f"👤 <code>{html.escape(str(seller_id))}</code>")
+    if views is not None:
+        stats.append(f"👁 {html.escape(_fmt_int(views))}")
+    if likes is not None:
+        stats.append(f"⭐ {html.escape(_fmt_int(likes))}")
+    if published_at is not None:
+        stats.append(f"🕒 {html.escape(_fmt_time(published_at))}")
+    if stats:
+        lines.append(" • ".join(stats))
+
+    if link:
+        lines.append(f"🔗 {html.escape(link)}")
 
     if desc:
         clean = re.sub(r"\s{3,}", "  ", desc).strip()
-        if len(clean) > 800:
-            clean = clean[:780] + "…"
-        lines.extend(["", "📝 <b>Описание</b>", html.escape(clean)])
+        if len(clean) > 500:
+            clean = clean[:500] + "…"
+        lines.append("")
+        lines.append("📝 <b>Описание:</b>")
+        lines.append(html.escape(clean))
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("╚════════════════════╝")
+
     card = "\n".join(lines)
     if len(card) > SHORT_CARD_MAX:
-        return card[: SHORT_CARD_MAX - 80] + "\n… <i>(обрезано)</i>\n━━━━━━━━━━━━━━━━━━━━"
+        return card[: SHORT_CARD_MAX - 80] + "\n… <i>(обрезано)</i>\n╚════════════════════╝"
     return card
 
 
@@ -1308,6 +1410,7 @@ async def show_status(user_id: int, chat_id: int):
     enabled_sources = [s for s in all_sources if s.get("enabled", True)]
     ab = sum(1 for s in all_sources if s.get("autobuy", False))
     interval = await user_hunter_interval(user_id)
+    balance_text = await get_account_buy_balance_text()
 
     mode_label = {"off": "ВЫКЛ", "classic": "КЛАССИЧЕСКИЙ", "super": "СУПЕР"}.get(mode, mode.upper())
 
@@ -1321,6 +1424,7 @@ async def show_status(user_id: int, chat_id: int):
         f"• Увидено: <b>{len(user_seen_items[user_id])}</b>\n"
         f"• Попыток автобая: <b>{len(user_buy_attempted[user_id])}</b>\n"
         f"• Balance ID: <code>{LZT_BALANCE_ID}</code>\n"
+        f"• Баланс покупки: <b>{html.escape(balance_text)}</b>\n"
         f"• Ошибок API: <b>{user_api_errors.get(user_id, 0)}</b>\n"
         f"• Лог: <code>{html.escape(AUTOBUY_LOG_FILE)}</code>"
     )
@@ -1485,10 +1589,13 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
                         if bought:
                             dur_ms = int((time.perf_counter() - found_perf) * 1000)
+                            bought_link = item.get("url") or item.get("link") or (f"https://lzt.market/{item_id}" if item_id is not None else "")
                             buy_result_text = (
                                 f"🛒 <b>Автобай</b> ✅ [{html.escape(src_name)}] "
                                 f"item_id=<code>{html.escape(str(item_id))}</code> "
-                                f"⏱ <b>{dur_ms}ms</b>\n{html.escape(str(buy_info))}"
+                                f"⏱ <b>{dur_ms}ms</b>\n"
+                                f"🔗 {html.escape(str(bought_link))}\n"
+                                f"{html.escape(str(buy_info))}"
                             )
                         else:
                             buy_result_text = (
@@ -1501,7 +1608,9 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
                     await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
                     if buy_result_text:
-                        await send_bot_message(chat_id, buy_result_text, parse_mode="HTML")
+                        if buy_result_text.startswith("🛒 <b>Автобай</b> ✅"):
+                            await send_bot_message(chat_id, "✅ <b>Куплено автобаем</b>\n" + make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                        await send_bot_message(chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
 
             await db_mark_seen_batch(user_id, seen_batch)
             await asyncio.sleep(await user_hunter_interval(user_id))
@@ -1544,6 +1653,7 @@ async def health_cmd(message: types.Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     await load_user_data(user_id)
+    user_balance_cache[0] = {"text": "—", "ts": 0}
     await show_status(user_id, chat_id)
     await safe_delete(message)
 
@@ -1752,9 +1862,13 @@ async def buttons_handler(message: types.Message):
             if mode == "pick_delete":
                 await db_remove_url(user_id, src["url"])
                 user_urls[user_id] = await db_get_urls(user_id)
+                exists_after = any(x.get("url") == src["url"] for x in user_urls[user_id])
                 user_modes[user_id] = None
                 user_page_state[user_id] = {"ctx": None, "page": 0}
-                await send_screen(chat_id, user_id, f"🗑 Удалено: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
+                if exists_after:
+                    await send_screen(chat_id, user_id, f"❌ Не удалось удалить: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
+                else:
+                    await send_screen(chat_id, user_id, f"🗑 Удалено: <b>{html.escape(name)}</b>\nОсталось URL: <b>{len(user_urls[user_id])}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
             if mode == "pick_test":
