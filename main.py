@@ -37,7 +37,7 @@ OWNER_IDS = {OWNER_ID}
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = 0.08
 FETCH_TIMEOUT = 5.40
-BUY_TIMEOUT = 6
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "1.80").strip())
 RETRY_MAX = 2
 RETRY_BASE_DELAY = 0.30
 
@@ -58,10 +58,11 @@ URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = 0.07
-AUTOBUY_RETRY_ATTEMPTS = 3
-AUTOBUY_RETRY_MIN_DELAY = 0.12
-AUTOBUY_RETRY_MAX_DELAY = 0.30
-FAST_AUTOBUY_TIMEOUT = 1.20
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.06").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.16").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.85").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "4").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -1112,11 +1113,12 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
     except Exception:
         source_base = ""
 
-    base_hosts = ["https://prod-api.lzt.market"]
-    if "api.lolz.live" in source_url.lower():
-        base_hosts.append("https://api.lolz.live")
+    base_hosts = []
     if source_base:
         base_hosts.append(source_base)
+    base_hosts.append("https://prod-api.lzt.market")
+    if "api.lolz.live" in source_url.lower():
+        base_hosts.append("https://api.lolz.live")
     base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
 
     dedup_bases = []
@@ -1262,6 +1264,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     headers_form = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
     payload_variants = _autobuy_payload_variants(item)
     buy_urls = _autobuy_prioritized_urls(source_url, item_id)
+    if AUTOBUY_URL_LIMIT > 0:
+        buy_urls = buy_urls[:AUTOBUY_URL_LIMIT]
 
     fast_payload = payload_variants[0] if payload_variants else {"balance_id": LZT_BALANCE_ID}
     fast_url = buy_urls[0] if buy_urls else None
