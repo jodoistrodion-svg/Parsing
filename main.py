@@ -37,7 +37,7 @@ OWNER_IDS = {OWNER_ID}
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = 0.08
 FETCH_TIMEOUT = 5.40
-BUY_TIMEOUT = 6
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "1.35").strip())
 RETRY_MAX = 2
 RETRY_BASE_DELAY = 0.30
 
@@ -58,10 +58,12 @@ URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = 0.07
-AUTOBUY_RETRY_ATTEMPTS = 3
-AUTOBUY_RETRY_MIN_DELAY = 0.12
-AUTOBUY_RETRY_MAX_DELAY = 0.30
-FAST_AUTOBUY_TIMEOUT = 1.20
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.09").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.55").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "3").strip())
+AUTOBUY_FAST_PARALLEL_URLS = int((os.getenv("AUTOBUY_FAST_PARALLEL_URLS") or "2").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -1112,11 +1114,12 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
     except Exception:
         source_base = ""
 
-    base_hosts = ["https://prod-api.lzt.market"]
-    if "api.lolz.live" in source_url.lower():
-        base_hosts.append("https://api.lolz.live")
+    base_hosts = []
     if source_base:
         base_hosts.append(source_base)
+    base_hosts.append("https://prod-api.lzt.market")
+    if "api.lolz.live" in source_url.lower():
+        base_hosts.append("https://api.lolz.live")
     base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
 
     dedup_bases = []
@@ -1262,9 +1265,10 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     headers_form = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
     payload_variants = _autobuy_payload_variants(item)
     buy_urls = _autobuy_prioritized_urls(source_url, item_id)
+    if AUTOBUY_URL_LIMIT > 0:
+        buy_urls = buy_urls[:AUTOBUY_URL_LIMIT]
 
     fast_payload = payload_variants[0] if payload_variants else {"balance_id": LZT_BALANCE_ID}
-    fast_url = buy_urls[0] if buy_urls else None
 
     since_found_ms = None
     if found_perf is not None:
@@ -1278,126 +1282,131 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     last_err = "unknown"
     session = await get_session()
 
-    async with buy_semaphore:
-        if fast_url:
-            try:
-                async with session.post(fast_url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
+    async def _post_once(url: str, payload: dict, timeout: float, *, as_form: bool = False):
+        try:
+            if as_form:
+                async with session.post(url, headers=headers_form, data=payload, timeout=timeout) as resp:
                     body = await resp.text()
                     state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
+                    return state, info, retry_as_form, resp.status
+            async with session.post(url, headers=headers_json, json=payload, timeout=timeout) as resp:
+                body = await resp.text()
+                state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
+                return state, info, retry_as_form, resp.status
+        except asyncio.TimeoutError:
+            return "retry", "timeout", False, 0
+        except Exception as e:
+            return "retry", str(e), False, 0
+
+    async with buy_semaphore:
+        race_urls = buy_urls[:AUTOBUY_FAST_PARALLEL_URLS]
+        race_tasks = [asyncio.create_task(_post_once(url, fast_payload, FAST_AUTOBUY_TIMEOUT, as_form=False)) for url in race_urls]
+        race_map = {task: url for task, url in zip(race_tasks, race_urls)}
+
+        for task in asyncio.as_completed(race_tasks):
+            url = race_map.get(task, "")
+            state, info, retry_as_form, status = await task
+            if status not in (404, 405, 0):
+                log_autobuy(
+                    f"BUY_RACE item_id={item_id} status={status} state={state} url={url} info='{_safe_compact(info,220)}'"
+                )
+
+            if state == "success":
+                _remember_autobuy_endpoint(source_url, url)
+                for t in race_tasks:
+                    if not t.done():
+                        t.cancel()
+                return True, f"{url} -> {info}"
+            if state == "auth":
+                for t in race_tasks:
+                    if not t.done():
+                        t.cancel()
+                return False, f"{url} -> HTTP {status}: ошибка авторизации API ({info})"
+            if state == "secret":
+                for t in race_tasks:
+                    if not t.done():
+                        t.cancel()
+                return False, f"{url} -> нужен/неверный ответ на секретный вопрос ({info})"
+            if state == "terminal":
+                _remember_autobuy_endpoint(source_url, url)
+                for t in race_tasks:
+                    if not t.done():
+                        t.cancel()
+                return False, f"{url} -> {info}"
+            last_err = f"{url} -> HTTP {status}: {info}" if status else f"{url} -> {info}"
+
+            if retry_as_form:
+                form_state, form_info, _, form_status = await _post_once(url, fast_payload, FAST_AUTOBUY_TIMEOUT, as_form=True)
+                if form_status not in (404, 405, 0):
                     log_autobuy(
-                        f"BUY_FAST item_id={item_id} status={resp.status} state={state} url={fast_url} info='{_safe_compact(info,220)}'"
+                        f"BUY_RACE_FORM item_id={item_id} status={form_status} state={form_state} url={url} info='{_safe_compact(form_info,220)}'"
                     )
-                    if state == "success":
-                        _remember_autobuy_endpoint(source_url, fast_url)
-                        return True, f"{fast_url} -> {info}"
-                    if state == "auth":
-                        return False, f"{fast_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
-                    if state == "secret":
-                        return False, f"{fast_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                    if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, fast_url)
-                        return False, f"{fast_url} -> {info}"
-                    last_err = f"{fast_url} -> HTTP {resp.status}: {info}"
+                if form_state == "success":
+                    _remember_autobuy_endpoint(source_url, url)
+                    for t in race_tasks:
+                        if not t.done():
+                            t.cancel()
+                    return True, f"{url} (form) -> {form_info}"
+                if form_state in {"auth", "secret", "terminal"}:
+                    if form_state == "terminal":
+                        _remember_autobuy_endpoint(source_url, url)
+                    for t in race_tasks:
+                        if not t.done():
+                            t.cancel()
+                    if form_state == "auth":
+                        return False, f"{url} (form) -> HTTP {form_status}: ошибка авторизации API ({form_info})"
+                    if form_state == "secret":
+                        return False, f"{url} (form) -> нужен/неверный ответ на секретный вопрос ({form_info})"
+                    return False, f"{url} (form) -> {form_info}"
+                last_err = f"{url} (form) -> HTTP {form_status}: {form_info}" if form_status else f"{url} (form) -> {form_info}"
 
-                    if retry_as_form:
-                        try:
-                            async with session.post(fast_url, headers=headers_form, data=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as form_resp:
-                                form_body = await form_resp.text()
-                                form_state, form_info, _ = _autobuy_classify_response(form_resp.status, form_body)
-                                log_autobuy(
-                                    f"BUY_FAST_FORM item_id={item_id} status={form_resp.status} state={form_state} url={fast_url} info='{_safe_compact(form_info,220)}'"
-                                )
-                                if form_state == "success":
-                                    _remember_autobuy_endpoint(source_url, fast_url)
-                                    return True, f"{fast_url} (form) -> {form_info}"
-                                if form_state == "auth":
-                                    return False, f"{fast_url} (form) -> HTTP {form_resp.status}: ошибка авторизации API ({form_info})"
-                                if form_state == "secret":
-                                    return False, f"{fast_url} (form) -> нужен/неверный ответ на секретный вопрос ({form_info})"
-                                if form_state == "terminal":
-                                    _remember_autobuy_endpoint(source_url, fast_url)
-                                    return False, f"{fast_url} (form) -> {form_info}"
-                                last_err = f"{fast_url} (form) -> HTTP {form_resp.status}: {form_info}"
-                        except asyncio.TimeoutError:
-                            last_err = f"{fast_url} (form) -> fast_buy_timeout"
-                        except Exception as e:
-                            last_err = f"{fast_url} (form) -> {e}"
-
-            except asyncio.TimeoutError:
-                last_err = f"{fast_url} -> fast_buy_timeout"
-            except Exception as e:
-                last_err = f"{fast_url} -> {e}"
-
+        tried_first_payload = set(race_urls)
         for buy_url in buy_urls:
             for payload_idx, payload in enumerate(payload_variants, start=1):
-                if buy_url == fast_url and payload_idx == 1:
-                    continue
-                need_form_retry = False
-                try:
-                    async with session.post(buy_url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
-                        body = await resp.text()
-                        state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
-
-                        if resp.status not in (404, 405):
-                            log_autobuy(
-                                f"BUY_TRY item_id={item_id} payload={payload_idx} status={resp.status} "
-                                f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                            )
-
-                        if state == "success":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            return True, f"{buy_url} -> {info}"
-                        if state == "auth":
-                            return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
-                        if state == "secret":
-                            return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                        if state == "terminal":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            return False, f"{buy_url} -> {info}"
-
-                        last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
-                        need_form_retry = retry_as_form
-
-                except asyncio.TimeoutError:
-                    last_err = f"{buy_url} -> buy_timeout"
-                    continue
-                except Exception as e:
-                    last_err = f"{buy_url} -> {e}"
+                if payload_idx == 1 and buy_url in tried_first_payload:
                     continue
 
-                if not need_form_retry:
+                state, info, retry_as_form, status = await _post_once(buy_url, payload, BUY_TIMEOUT, as_form=False)
+                if status not in (404, 405, 0):
+                    log_autobuy(
+                        f"BUY_TRY item_id={item_id} payload={payload_idx} status={status} "
+                        f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                    )
+
+                if state == "success":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return True, f"{buy_url} -> {info}"
+                if state == "auth":
+                    return False, f"{buy_url} -> HTTP {status}: ошибка авторизации API ({info})"
+                if state == "secret":
+                    return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                if state == "terminal":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return False, f"{buy_url} -> {info}"
+
+                last_err = f"{buy_url} -> HTTP {status}: {info}" if status else f"{buy_url} -> {info}"
+                if not retry_as_form:
                     continue
 
-                try:
-                    async with session.post(buy_url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as form_resp:
-                        form_body = await form_resp.text()
-                        state, info, _ = _autobuy_classify_response(form_resp.status, form_body)
+                form_state, form_info, _, form_status = await _post_once(buy_url, payload, BUY_TIMEOUT, as_form=True)
+                if form_status not in (404, 405, 0):
+                    log_autobuy(
+                        f"BUY_TRY_FORM item_id={item_id} payload={payload_idx} status={form_status} "
+                        f"state={form_state} url={buy_url} info='{_safe_compact(form_info,220)}'"
+                    )
 
-                        if form_resp.status not in (404, 405):
-                            log_autobuy(
-                                f"BUY_TRY_FORM item_id={item_id} payload={payload_idx} status={form_resp.status} "
-                                f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                            )
+                if form_state == "success":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return True, f"{buy_url} (form) -> {form_info}"
+                if form_state == "auth":
+                    return False, f"{buy_url} (form) -> HTTP {form_status}: ошибка авторизации API ({form_info})"
+                if form_state == "secret":
+                    return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({form_info})"
+                if form_state == "terminal":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return False, f"{buy_url} (form) -> {form_info}"
 
-                        if state == "success":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            return True, f"{buy_url} (form) -> {info}"
-                        if state == "auth":
-                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: ошибка авторизации API ({info})"
-                        if state == "secret":
-                            return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
-                        if state == "terminal":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            return False, f"{buy_url} (form) -> {info}"
-
-                        last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
-
-                except asyncio.TimeoutError:
-                    last_err = f"{buy_url} (form) -> buy_timeout"
-                    continue
-                except Exception as e:
-                    last_err = f"{buy_url} (form) -> {e}"
-                    continue
+                last_err = f"{buy_url} (form) -> HTTP {form_status}: {form_info}" if form_status else f"{buy_url} (form) -> {form_info}"
 
     return False, last_err
 
