@@ -259,6 +259,7 @@ user_seen_items = defaultdict(set)
 user_buy_attempted = defaultdict(set)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 user_hunter_start_locks: dict[int, asyncio.Lock] = {}
+user_history_reset_pending = defaultdict(lambda: False)
 
 user_modes = defaultdict(lambda: None)
 user_started = set()
@@ -1214,14 +1215,19 @@ def _autobuy_classify_response(status: int, text: str):
     terminal_error_markers = (
         "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
-        "forbidden", "access denied",
+        "forbidden", "access denied", "аккаунт продан",
+        "в очереди на автоматическую покупку", "попробуйте повторить позднее",
+    )
+    auth_error_markers = (
+        "api key", "scope", "token", "unauthorized", "authorization", "bearer",
+        "неверный ключ", "доступ запрещен", "доступ запрещён",
     )
 
     if status in (404, 405):
         return "retry", raw[:220], False
     if status in (200, 201, 202):
         return "success", raw[:220], False
-    if status in (401, 403):
+    if status == 401:
         return "auth", raw[:220], False
     if status == 415:
         return "retry", raw[:220], True
@@ -1234,6 +1240,10 @@ def _autobuy_classify_response(status: int, text: str):
         return "success", raw[:220], False
     if any(marker in joined for marker in terminal_error_markers):
         return "terminal", raw[:220], False
+    if status == 403:
+        if any(marker in joined for marker in auth_error_markers):
+            return "auth", raw[:220], False
+        return "retry", raw[:220], False
     return "retry", raw[:220], False
 
 
@@ -1289,7 +1299,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return True, f"{buy_url} -> {info}"
                         if state == "auth":
-                            return False, f"{buy_url} -> HTTP {resp.status}: проверьте API ключ и scope market ({info})"
+                            return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
                         if state == "secret":
                             return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
                         if state == "terminal":
@@ -1324,7 +1334,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return True, f"{buy_url} (form) -> {info}"
                         if state == "auth":
-                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: проверьте API ключ и scope market ({info})"
+                            return False, f"{buy_url} (form) -> HTTP {form_resp.status}: ошибка авторизации API ({info})"
                         if state == "secret":
                             return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
                         if state == "terminal":
@@ -1363,7 +1373,8 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
             low = (info or "").lower()
             terminal = any(x in low for x in [
                 "недостаточно", "already sold", "already purchased", "already bought",
-                "уже продан", "нельзя купить", "secret", "auth", "401", "403",
+                "уже продан", "нельзя купить", "секрет", "secret", "auth", "401",
+                "в очереди на автоматическую покупку", "попробуйте повторить позднее", "аккаунт продан",
             ])
             if terminal:
                 return False, f"attempt={attempt}/{attempts} | {info}"
@@ -1913,9 +1924,10 @@ async def buttons_handler(message: types.Message):
         if text == "♻️ Сбросить историю":
             user_seen_items[user_id].clear()
             user_buy_attempted[user_id].clear()
+            user_history_reset_pending[user_id] = True
             await db_clear_seen(user_id)
             await db_clear_buy_attempted(user_id)
-            await send_screen(chat_id, user_id, "♻️ История сброшена. Теперь лоты снова считаются новыми.", reply_markup=kb_main(user_id))
+            await send_screen(chat_id, user_id, "♻️ История сброшена. Следующий запуск охотника обработает все лоты как новые (включая автобай по URL, где он активен).", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text in ("🚀 Старт охотника", "⚡ Супер охотник"):
@@ -1938,7 +1950,12 @@ async def buttons_handler(message: types.Message):
                 user_buy_attempted[user_id] = await db_load_buy_attempted(user_id)
 
                 if not user_seen_items[user_id]:
-                    await seed_existing_without_notifications(user_id)
+                    if user_history_reset_pending[user_id]:
+                        log_autobuy(f"HUNTER_RESET_MODE user_id={user_id} mode={requested_mode} treat_all_as_new=1")
+                    else:
+                        await seed_existing_without_notifications(user_id)
+
+                user_history_reset_pending[user_id] = False
 
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
