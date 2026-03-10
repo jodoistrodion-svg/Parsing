@@ -1258,13 +1258,16 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
     except Exception:
         source_base = ""
 
-    base_hosts = []
-    if source_base:
+    base_hosts = ["https://prod-api.lzt.market", "https://api.lzt.market", "https://api.lolz.live"]
+
+    source_low = source_url.lower()
+    source_is_api = source_base and any(marker in source_low for marker in ("api.", "prod-api."))
+    if source_base and source_is_api:
+        base_hosts.insert(0, source_base)
+    elif source_base:
+        # Для web-URL (например, https://lzt.market/...) API-эндпоинты приоритетнее.
+        # Иначе AUTOBUY_URL_LIMIT может обрезать список до web-путей с 404.
         base_hosts.append(source_base)
-    base_hosts.append("https://prod-api.lzt.market")
-    if "api.lolz.live" in source_url.lower():
-        base_hosts.append("https://api.lolz.live")
-    base_hosts.extend(["https://api.lzt.market", "https://api.lolz.live"])
 
     dedup_bases = []
     seen_bases = set()
