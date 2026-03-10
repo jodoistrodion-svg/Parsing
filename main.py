@@ -323,6 +323,7 @@ user_modes = defaultdict(lambda: None)
 user_started = set()
 user_urls = defaultdict(list)
 user_api_errors = defaultdict(int)
+user_roles = defaultdict(lambda: "unknown")
 
 user_last_screen_msg_id = defaultdict(lambda: None)
 user_pending_url = defaultdict(lambda: None)
@@ -562,6 +563,11 @@ async def init_db():
     if "last_error_report" not in ucols:
         await db_execute("ALTER TABLE users ADD COLUMN last_error_report INTEGER DEFAULT 0", commit=True)
 
+    await db_execute(
+        "CREATE INDEX IF NOT EXISTS idx_urls_user_added ON urls(user_id, added_at, url)",
+        commit=True,
+    )
+
 
 async def db_ensure_user(user_id: int):
     await db_execute(
@@ -711,12 +717,13 @@ async def load_user_data(user_id: int, force: bool = False):
     user_urls[user_id] = await db_get_urls(user_id)
     user_seen_items[user_id] = await db_load_seen(user_id)
     user_buy_attempted[user_id] = await db_load_buy_attempted(user_id)
+    user_roles[user_id] = await db_get_role(user_id)
     user_started.add(user_id)
 
 
 async def get_user_role(user_id: int) -> str | None:
     await load_user_data(user_id)
-    role = await db_get_role(user_id)
+    role = user_roles.get(user_id, "unknown")
     return None if role == "unknown" else role
 
 
@@ -1007,19 +1014,29 @@ async def get_all_sources(user_id: int, enabled_only: bool = False):
     return out
 
 
+def _build_source_info(src: dict) -> dict:
+    url = src["url"]
+    return {
+        "idx": src["idx"],
+        "url": url,
+        "name": src.get("name") or f"URL #{src['idx']}",
+        "enabled": src.get("enabled", True),
+        "autobuy": src.get("autobuy", False),
+    }
+
+
+async def _fetch_source_items(src: dict):
+    source_info = _build_source_info(src)
+    items, err = await fetch_with_retry(source_info["url"])
+    return source_info, items, err
+
+
 async def fetch_all_sources(user_id: int):
     sources = await get_all_sources(user_id, enabled_only=True)
     if not sources:
         return [], []
 
-    async def _fetch_one(src: dict):
-        url = src["url"]
-        label = src.get("name") or f"URL #{src['idx']}"
-        source_info = {"idx": src["idx"], "url": url, "name": label, "enabled": src.get("enabled", True), "autobuy": src.get("autobuy", False)}
-        items, err = await fetch_with_retry(url)
-        return source_info, items, err
-
-    tasks = [asyncio.create_task(_fetch_one(s)) for s in sources]
+    tasks = [asyncio.create_task(_fetch_source_items(s)) for s in sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     items_with_sources = []
@@ -1043,14 +1060,7 @@ async def iter_sources_results(user_id: int):
     if not sources:
         return
 
-    async def _fetch_one(src: dict):
-        url = src["url"]
-        label = src.get("name") or f"URL #{src['idx']}"
-        source_info = {"idx": src["idx"], "url": url, "name": label, "enabled": src.get("enabled", True), "autobuy": src.get("autobuy", False)}
-        items, err = await fetch_with_retry(url)
-        return source_info, items, err
-
-    tasks = [asyncio.create_task(_fetch_one(s)) for s in sources]
+    tasks = [asyncio.create_task(_fetch_source_items(s)) for s in sources]
     try:
         for fut in asyncio.as_completed(tasks):
             try:
@@ -1708,8 +1718,7 @@ async def seed_existing_without_notifications(user_id: int):
             buy_batch.append(key)
 
     await db_mark_seen_batch(user_id, seen_batch)
-    for key in buy_batch:
-        await db_mark_buy_attempted(user_id, key)
+    await db_mark_buy_attempted_batch(user_id, buy_batch)
 
 
 async def hunter_loop_for_user(user_id: int, chat_id: int):
