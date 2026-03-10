@@ -51,9 +51,10 @@ MAX_CONCURRENT_REQUESTS = 20
 LIMITED_EXTRA_DELAY = 3.0
 MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "20").strip())
 
-DB_FILE = "bot_data.sqlite"
+DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
 LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
+SEED_URLS_JSON = (os.getenv("SEED_URLS_JSON") or "").strip()
 
 URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
@@ -667,6 +668,45 @@ async def db_set_url_autobuy(user_id: int, url: str, autobuy: bool):
     await db_execute("UPDATE urls SET autobuy=? WHERE user_id=? AND url=?", (1 if autobuy else 0, user_id, url), commit=True)
 
 
+def _load_seed_urls() -> list[tuple[str, str]]:
+    if not SEED_URLS_JSON:
+        return []
+
+    out: list[tuple[str, str]] = []
+    try:
+        data = json.loads(SEED_URLS_JSON)
+    except Exception:
+        return out
+
+    if not isinstance(data, list):
+        return out
+
+    for i, row in enumerate(data, start=1):
+        if isinstance(row, dict):
+            raw_url = str(row.get("url") or "").strip()
+            raw_name = str(row.get("name") or f"SEED #{i}").strip()
+        else:
+            raw_url = str(row or "").strip()
+            raw_name = f"SEED #{i}"
+
+        if not raw_url:
+            continue
+        normalized = normalize_url(raw_url)
+        ok, _ = validate_market_url(normalized)
+        if not ok:
+            continue
+        out.append((normalized, raw_name))
+    return out
+
+
+async def db_seed_urls_if_empty(user_id: int):
+    existing = await db_get_urls(user_id)
+    if existing:
+        return
+    for url, name in _load_seed_urls():
+        await db_add_url(user_id, url, name)
+
+
 async def db_mark_seen_batch(user_id: int, keys: list[str]):
     if not keys:
         return
@@ -714,6 +754,7 @@ async def load_user_data(user_id: int, force: bool = False):
     if user_id in user_started and not force:
         return
     await db_ensure_user(user_id)
+    await db_seed_urls_if_empty(user_id)
     user_urls[user_id] = await db_get_urls(user_id)
     user_seen_items[user_id] = await db_load_seen(user_id)
     user_buy_attempted[user_id] = await db_load_buy_attempted(user_id)
@@ -1233,12 +1274,15 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
         seen_bases.add(base)
         dedup_bases.append(base)
 
-    fast_paths = ["{id}/fast-buy", "{id}/buy", "item/{id}/fast-buy", "item/{id}/buy"]
+    # Важно: первые URL используются в fast-режиме и ограничиваются AUTOBUY_URL_LIMIT.
+    # Поэтому в приоритете оставляем API-пути, которые реально встречаются в маркет-API,
+    # а web-путь item/{id}/buy убираем из ранних попыток (он часто 404).
+    fast_paths = ["{id}/fast-buy", "market/{id}/fast-buy", "{id}/buy", "market/{id}/buy"]
     slow_paths = [
         "{id}/purchase",
-        "market/{id}/fast-buy",
-        "market/{id}/buy",
         "market/{id}/purchase",
+        "item/{id}/fast-buy",
+        "item/{id}/buy",
         "item/{id}/purchase",
         "items/{id}/buy",
         "items/{id}/fast-buy",
@@ -1346,6 +1390,12 @@ def _autobuy_classify_response(status: int, text: str):
             return "auth", raw[:220], False
         return "retry", raw[:220], False
     return "retry", raw[:220], False
+
+
+def _sanitize_buy_info_for_user(info: str) -> str:
+    s = str(info or "")
+    s = re.sub(r"https?://\S+", "[api-endpoint]", s)
+    return s
 
 
 async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
@@ -1767,12 +1817,12 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                                 f"item_id=<code>{html.escape(str(item_id))}</code> "
                                 f"⏱ <b>{dur_ms}ms</b>\n"
                                 f"🔗 {html.escape(str(bought_link))}\n"
-                                f"{html.escape(str(buy_info))}"
+                                f"{html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
                             )
                         else:
                             buy_result_text = (
                                 f"🛒 <b>Автобай</b> ❌ [{html.escape(src_name)}] "
-                                f"item_id=<code>{html.escape(str(item_id))}</code>\n{html.escape(str(buy_info))}"
+                                f"item_id=<code>{html.escape(str(item_id))}</code>\n{html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
                             )
 
                     user_seen_items[user_id].add(key)
