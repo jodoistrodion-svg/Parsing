@@ -35,11 +35,11 @@ OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
-HUNTER_INTERVAL_BASE = 0.06
-FETCH_TIMEOUT = 3.20
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.40").strip())
-RETRY_MAX = 1
-RETRY_BASE_DELAY = 0.30
+HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.01").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "2.20").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.25").strip())
+RETRY_MAX = int((os.getenv("RETRY_MAX") or "2").strip())
+RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.08").strip())
 
 SHORT_CARD_MAX = 950
 ERROR_REPORT_INTERVAL = 3600
@@ -47,11 +47,11 @@ ERROR_REPORT_INTERVAL = 3600
 MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
-MAX_CONCURRENT_REQUESTS = 20
+MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "80").strip())
 LIMITED_EXTRA_DELAY = 3.0
-MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "20").strip())
-SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.30").strip())
-OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.03").strip())
+MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "80").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.01").strip())
+OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.001").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -61,13 +61,13 @@ SEED_URLS_JSON = (os.getenv("SEED_URLS_JSON") or "").strip()
 URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
-TG_SEND_DELAY = 0.02
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "1").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.08").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.35").strip())
+TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.0").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "3").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.005").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.02").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "1").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "3").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "5").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "4.80").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "35").strip())
 
@@ -337,7 +337,7 @@ user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
 autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
-buy_semaphore = asyncio.Semaphore(8)
+buy_semaphore = asyncio.Semaphore(int((os.getenv("BUY_SEMAPHORE") or "64").strip()))
 
 
 def get_buy_lock(item_key: str) -> asyncio.Lock:
@@ -926,7 +926,7 @@ async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT, connect=3, sock_connect=3, sock_read=FETCH_TIMEOUT)
-        connector = aiohttp.TCPConnector(limit=64, limit_per_host=32, ttl_dns_cache=300, enable_cleanup_closed=True)
+        connector = aiohttp.TCPConnector(limit=256, limit_per_host=128, ttl_dns_cache=300, enable_cleanup_closed=True)
         _global_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _global_session
 
@@ -1901,7 +1901,6 @@ async def seed_existing_without_notifications(user_id: int):
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     ensure_notify_worker(user_id)
-
     while user_search_active[user_id]:
         seen_batch = []
         buy_attempt_batch = []
@@ -2290,11 +2289,8 @@ async def buttons_handler(message: types.Message):
                 user_seen_items[user_id] = await db_load_seen(user_id)
                 user_buy_attempted[user_id] = await db_load_buy_attempted(user_id)
 
-                if not user_seen_items[user_id]:
-                    if user_history_reset_pending[user_id]:
-                        log_autobuy(f"HUNTER_RESET_MODE user_id={user_id} mode={requested_mode} treat_all_as_new=1")
-                    else:
-                        await seed_existing_without_notifications(user_id)
+                if not user_seen_items[user_id] and user_history_reset_pending[user_id]:
+                    log_autobuy(f"HUNTER_RESET_MODE user_id={user_id} mode={requested_mode} treat_all_as_new=1")
 
                 user_history_reset_pending[user_id] = False
 
