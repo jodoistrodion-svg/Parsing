@@ -41,7 +41,7 @@ BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.25").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "2").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.08").strip())
 
-SHORT_CARD_MAX = 950
+SHORT_CARD_MAX = 3200
 ERROR_REPORT_INTERVAL = 3600
 
 MAX_URLS_PER_USER_DEFAULT = 50
@@ -137,12 +137,20 @@ START_MSG_1 = (
 )
 
 START_MSG_2 = (
-    "🧭 Меню\n\n"
-    "• ✨ Проверка лотов — показать до 10 лотов\n"
-    "• 📚 Мои URL — управление источниками (+ 🛒 автобай)\n"
-    "• 🚀 Старт охотника — мониторинг\n"
-    "• ♻️ Сбросить историю — чтобы снова считать лоты новыми"
+    "🧭 Главное меню\n\n"
+    "• ✨ Проверка лотов — быстрый просмотр до 10 свежих карточек\n"
+    "• 📚 Мои URL — управление источниками, тестом и автобаем\n"
+    "• 📊 Статус — сводка по работе, балансу и ошибкам API\n"
+    "• 🚀 Старт охотника — непрерывный мониторинг новых лотов\n"
+    "• ♻️ Сбросить историю — считать все лоты снова новыми"
 )
+
+
+WELCOME_STICKERS = [
+    "CAACAgIAAxkBAAIBQmYkJ4hB5lL0QwABJvY5S4UuTxR1xAACZQADwDZPE9xKkS4L5N5eNgQ",
+    "CAACAgIAAxkBAAIBQ2YkJ5ILV0M5mD9Vpq3nP8a3m2qvAALgAAPANk8Tq5Y-X_7h3xQ2BA",
+    "CAACAgIAAxkBAAIBRGYkJ53xVv9wNR8d3lNn2s9y4C9fAALiAAPANk8TG8rJkYdM3MM2BA",
+]
 
 DENIED_TEXT = (
     "⛔️ Доступ к боту закрыт по умолчанию.\n\n"
@@ -169,10 +177,10 @@ def kb_request() -> ReplyKeyboardMarkup:
 
 def kb_main(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
-        [kb_button("🚀 Старт охотника", "success")],
-        [kb_button("🛑 Стоп охотника"), kb_button("✨ Проверка лотов")],
-        [kb_button("📊 Статус", "primary"), kb_button("📚 Мои URL")],
-        [kb_button("♻️ Сбросить историю"), kb_button("ℹ️ Инфо")],
+        [kb_button("🚀 Старт охотника", "success"), kb_button("🛑 Стоп охотника")],
+        [kb_button("✨ Проверка лотов", "primary"), kb_button("📊 Статус")],
+        [kb_button("📚 Мои URL", "primary"), kb_button("♻️ Сбросить историю")],
+        [kb_button("ℹ️ Инфо")],
     ]
     if user_id in OWNER_IDS:
         rows.insert(4, [kb_button("👥 Пользователи", "primary")])
@@ -182,13 +190,98 @@ def kb_main(user_id: int) -> ReplyKeyboardMarkup:
 def kb_urls_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [kb_button("📄 Список URL"), kb_button("➕ Добавить URL", "success")],
-            [kb_button("✏️ Переименовать URL"), kb_button("🗑 Удалить URL", "danger")],
+            [kb_button("➕ Добавить URL", "success"), kb_button("📄 Список URL")],
             [kb_button("🔁 Вкл/Выкл URL"), kb_button("🛒 Автобай URL", "primary")],
+            [kb_button("✏️ Переименовать URL"), kb_button("🗑 Удалить URL", "danger")],
             [kb_button("✅ Тест URL"), kb_button("⬅️ Назад")],
         ],
         resize_keyboard=True,
     )
+
+
+def _to_bool_label(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "Да" if value else "Нет"
+    low = str(value).strip().lower()
+    if low in {"1", "true", "yes", "on", "enabled", "да"}:
+        return "Да"
+    if low in {"0", "false", "no", "off", "disabled", "нет"}:
+        return "Нет"
+    return None
+
+
+def _format_value(v, limit: int = 140) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, (int, float)):
+        if isinstance(v, float) and not v.is_integer():
+            return f"{v:.2f}".rstrip("0").rstrip(".")
+        return f"{int(v):,}".replace(",", " ")
+    s = str(v).strip()
+    s = re.sub(r"\s+", " ", s)
+    if len(s) > limit:
+        return s[: limit - 1] + "…"
+    return s
+
+
+def _pick_first(item: dict, keys: list[str]):
+    for k in keys:
+        if k in item and item.get(k) not in (None, ""):
+            return item.get(k)
+    return None
+
+
+def _collect_item_specs(item: dict) -> list[str]:
+    known_specs = [
+        ("🏆 Трофеи", ["trophies", "cups", "brawl_cup", "clash_cup", "rating"]),
+        ("🔼 Уровень", ["level", "lvl", "user_level", "genshin_level"]),
+        ("🏰 TownHall", ["townhall", "th"]),
+        ("🧩 Ранг", ["rank", "elo", "mmr"]),
+        ("🎖 Прайм", ["prime", "premium", "vip"]),
+        ("📱 Привязка телефона", ["phone_bound", "phone"]),
+        ("📧 Привязка почты", ["email_bound", "email"]),
+        ("📨 Доступ к почте", ["mail_access", "email_access"]),
+        ("🔐 2FA", ["twofa", "2fa", "ga", "guard"]),
+        ("🌍 Регион", ["region", "country", "locale", "server"]),
+        ("🧭 Платформа", ["platform", "device", "os"]),
+        ("🧱 Инвентарь", ["inventory", "inv_value", "skin_count", "items_count"]),
+    ]
+
+    specs: list[str] = []
+    used: set[str] = set()
+    for label, keys in known_specs:
+        raw = _pick_first(item, keys)
+        if raw is None:
+            continue
+        for k in keys:
+            if k in item:
+                used.add(k)
+
+        bool_label = _to_bool_label(raw)
+        value = bool_label if bool_label is not None else _format_value(raw)
+        specs.append(f"• {label}: <b>{html.escape(value)}</b>")
+
+    ignored = {
+        "title", "price", "old_price", "discount", "item_id", "id", "url", "link", "description", "desc",
+        "category", "category_name", "game", "type", "seller_id", "owner_id", "user_id", "views", "view_count",
+        "likes", "favorites", "fav_count", "published_at", "created_at", "date", "time", "updated_at", "edited_at",
+    }
+    extras_added = 0
+    for k, v in item.items():
+        if extras_added >= 8:
+            break
+        if k in ignored or k in used:
+            continue
+        if v in (None, "", [], {}):
+            continue
+        if isinstance(v, (dict, list, tuple, set)):
+            continue
+        human_key = k.replace("_", " ").strip().title()
+        specs.append(f"• {html.escape(human_key)}: <b>{html.escape(_format_value(v, limit=90))}</b>")
+        extras_added += 1
+    return specs
 
 
 # ====================== HELPERS ======================
@@ -196,6 +289,17 @@ def has_valid_telegram_token(token: str) -> bool:
     if not token:
         return False
     return bool(re.match(r"^\d{6,12}:[A-Za-z0-9_-]{20,}$", token))
+
+
+async def send_welcome_sticker(chat_id: int):
+    if bot is None:
+        return
+    for st in WELCOME_STICKERS:
+        try:
+            await bot.send_sticker(chat_id, st)
+            return
+        except Exception:
+            continue
 
 
 async def safe_delete(message: types.Message):
@@ -1177,18 +1281,14 @@ async def iter_sources_results(user_id: int):
 def make_card(item: dict, source_name: str) -> str:
     title = str(item.get("title", "Без названия"))
     price = item.get("price", None)
+    old_price = item.get("old_price") or item.get("original_price")
+    discount = item.get("discount")
     item_id = item.get("item_id") or item.get("id")
-
-    trophies = item.get("trophies") or item.get("cups") or item.get("brawl_cup") or None
-    level = item.get("level") or item.get("lvl") or item.get("user_level") or None
-    townhall = item.get("townhall") or item.get("th") or None
-    phone_bound = item.get("phone_bound")
-    if phone_bound is None:
-        phone_bound = item.get("phone")
 
     seller_id = item.get("seller_id") or item.get("owner_id") or item.get("user_id")
     category = item.get("category") or item.get("category_name") or item.get("game") or item.get("type")
     published_at = item.get("published_at") or item.get("created_at") or item.get("date") or item.get("time")
+    updated_at = item.get("updated_at") or item.get("edited_at")
     views = item.get("views") or item.get("view_count")
     likes = item.get("likes") or item.get("favorites") or item.get("fav_count")
 
@@ -1199,12 +1299,6 @@ def make_card(item: dict, source_name: str) -> str:
         desc = ""
 
     direct_url = item.get("url") or item.get("link") or None
-
-    def _fmt_int(x):
-        try:
-            return f"{int(x):,}".replace(",", " ")
-        except Exception:
-            return str(x)
 
     def _fmt_time(x):
         try:
@@ -1217,60 +1311,63 @@ def make_card(item: dict, source_name: str) -> str:
     link = direct_url or (f"https://lzt.market/{item_id}" if item_id is not None else None)
 
     lines = []
-    lines.append("╔════════════════════╗")
+    lines.append("╔══════ 🎐 Карточка лота 🎐 ══════╗")
     lines.append(f"🎯 <b>{html.escape(title)}</b>")
     lines.append(f"📦 Источник: <b>{html.escape(str(source_name or 'Источник'))}</b>")
 
-    main_meta = []
+    pricing = []
     if price is not None and price != "—":
-        main_meta.append(f"💰 <b>{html.escape(_fmt_int(price))} ₽</b>")
+        pricing.append(f"💰 Цена: <b>{html.escape(_format_value(price))} ₽</b>")
+    if old_price not in (None, ""):
+        pricing.append(f"🏷 Старая цена: <b>{html.escape(_format_value(old_price))} ₽</b>")
+    if discount not in (None, ""):
+        pricing.append(f"📉 Скидка: <b>{html.escape(_format_value(discount))}</b>")
+    if pricing:
+        lines.extend(pricing)
+
+    main_meta = []
     if category:
-        main_meta.append(f"🏷 {html.escape(str(category))}")
+        main_meta.append(f"🎮 Категория: <b>{html.escape(str(category))}</b>")
     if item_id is not None:
-        main_meta.append(f"🆔 <code>{html.escape(str(item_id))}</code>")
-    if main_meta:
-        lines.append(" • ".join(main_meta))
-
-    extra_meta = []
-    if trophies is not None:
-        extra_meta.append(f"🏆 {html.escape(_fmt_int(trophies))}")
-    if level is not None:
-        extra_meta.append(f"🔼 {html.escape(_fmt_int(level))}")
-    if townhall is not None:
-        extra_meta.append(f"🏰 {html.escape(_fmt_int(townhall))}")
-    if phone_bound is not None:
-        extra_meta.append(f"📱 {'Да' if phone_bound else 'Нет'}")
-    if extra_meta:
-        lines.append(" • ".join(extra_meta))
-
-    stats = []
+        main_meta.append(f"🆔 Лот: <code>{html.escape(str(item_id))}</code>")
     if seller_id is not None:
-        stats.append(f"👤 <code>{html.escape(str(seller_id))}</code>")
+        main_meta.append(f"👤 Продавец: <code>{html.escape(str(seller_id))}</code>")
     if views is not None:
-        stats.append(f"👁 {html.escape(_fmt_int(views))}")
+        main_meta.append(f"👁 Просмотры: <b>{html.escape(_format_value(views))}</b>")
     if likes is not None:
-        stats.append(f"⭐ {html.escape(_fmt_int(likes))}")
+        main_meta.append(f"⭐ Избранное: <b>{html.escape(_format_value(likes))}</b>")
+    lines.extend(main_meta)
+
+    timing = []
     if published_at is not None:
-        stats.append(f"🕒 {html.escape(_fmt_time(published_at))}")
-    if stats:
-        lines.append(" • ".join(stats))
+        timing.append(f"🕒 Опубликован: <b>{html.escape(_fmt_time(published_at))}</b>")
+    if updated_at is not None:
+        timing.append(f"♻️ Обновлён: <b>{html.escape(_fmt_time(updated_at))}</b>")
+    if timing:
+        lines.extend(timing)
+
+    specs = _collect_item_specs(item)
+    if specs:
+        lines.append("")
+        lines.append("🧾 <b>Подробности:</b>")
+        lines.extend(specs)
 
     if link:
-        lines.append(f"🔗 {html.escape(link)}")
+        lines.append("")
+        lines.append(f"🔗 Ссылка: {html.escape(link)}")
 
     if desc:
         clean = re.sub(r"\s{3,}", "  ", desc).strip()
-        if len(clean) > 500:
-            clean = clean[:500] + "…"
+        if len(clean) > 1200:
+            clean = clean[:1200] + "…"
         lines.append("")
         lines.append("📝 <b>Описание:</b>")
         lines.append(html.escape(clean))
-
-    lines.append("╚════════════════════╝")
+    lines.append("╚══════════════════════════════════╝")
 
     card = "\n".join(lines)
     if len(card) > SHORT_CARD_MAX:
-        return card[: SHORT_CARD_MAX - 80] + "\n… <i>(обрезано)</i>\n╚════════════════════╝"
+        return card[: SHORT_CARD_MAX - 120] + "\n… <i>(часть текста скрыта из-за лимита Telegram)</i>\n╚══════════════════════════════════╝"
     return card
 
 
@@ -1987,6 +2084,7 @@ async def start_cmd(message: types.Message):
     user_id = message.from_user.id
     await load_user_data(user_id, force=True)
 
+    await send_welcome_sticker(message.chat.id)
     await send_bot_message(message.chat.id, START_MSG_1, disable_web_page_preview=True)
     allowed = await db_is_allowed(user_id)
 
@@ -2186,7 +2284,8 @@ async def buttons_handler(message: types.Message):
                     f"<b>{html.escape(name)}</b>\n"
                     f"• Статус: {'🟢 ВКЛ' if src.get('enabled', True) else '🔴 ВЫКЛ'}\n"
                     f"• Автобай: {'🛒 ВКЛ' if src.get('autobuy', False) else '— ВЫКЛ'}\n"
-                    f"• API URL:\n<code>{html.escape(src['url'])}</code>"
+                    f"• API URL:\n<code>{html.escape(src['url'])}</code>\n"
+                    f"• Рекомендация: {'✅ Готов к охоте' if src.get('enabled', True) else '⚠️ Выключен, новые лоты не придут'}"
                 )
                 page = user_page_state[user_id].get("page", 0)
                 kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
@@ -2199,7 +2298,7 @@ async def buttons_handler(message: types.Message):
                 user_urls[user_id] = await db_get_urls(user_id)
                 user_modes[user_id] = None
                 user_page_state[user_id] = {"ctx": None, "page": 0}
-                await send_screen(chat_id, user_id, f"🛒 {html.escape(name)}: {'ВКЛ' if new_ab else 'ВЫКЛ'}", reply_markup=kb_urls_menu())
+                await send_screen(chat_id, user_id, f"🛒 <b>{html.escape(name)}</b>: {'ВКЛ' if new_ab else 'ВЫКЛ'}", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
             if mode == "pick_toggle":
@@ -2208,7 +2307,7 @@ async def buttons_handler(message: types.Message):
                 user_urls[user_id] = await db_get_urls(user_id)
                 user_modes[user_id] = None
                 user_page_state[user_id] = {"ctx": None, "page": 0}
-                await send_screen(chat_id, user_id, f"🔁 {html.escape(name)}: {'ВКЛ' if new_enabled else 'ВЫКЛ'}", reply_markup=kb_urls_menu())
+                await send_screen(chat_id, user_id, f"🔁 <b>{html.escape(name)}</b>: {'ВКЛ' if new_enabled else 'ВЫКЛ'}", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
             if mode == "pick_delete":
@@ -2250,6 +2349,7 @@ async def buttons_handler(message: types.Message):
                 "🛒 Обычный автобай включается по конкретному URL.\n\n"
                 f"🧾 Лог автобая: {AUTOBUY_LOG_FILE}",
                 reply_markup=kb_main(user_id),
+                parse_mode="HTML",
             )
             return await safe_delete(message)
 
