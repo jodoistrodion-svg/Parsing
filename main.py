@@ -50,6 +50,8 @@ MAX_URLS_PER_USER_LIMITED = 3
 MAX_CONCURRENT_REQUESTS = 20
 LIMITED_EXTRA_DELAY = 3.0
 MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "20").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "3.0").strip())
+OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.2").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -865,6 +867,59 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 _global_session: aiohttp.ClientSession | None = None
 
 
+class RequestRateLimiter:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._next_allowed_at: dict[str, float] = {}
+
+    async def wait(self, bucket: str, min_interval: float):
+        if min_interval <= 0:
+            return
+
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                allowed_at = self._next_allowed_at.get(bucket, 0.0)
+                wait_for = allowed_at - now
+                if wait_for <= 0:
+                    self._next_allowed_at[bucket] = now + min_interval
+                    return
+            await asyncio.sleep(min(wait_for, min_interval))
+
+
+request_rate_limiter = RequestRateLimiter()
+
+
+def _is_search_endpoint(url: str) -> bool:
+    try:
+        path = (urlsplit(url).path or "").strip().lower()
+    except Exception:
+        return False
+
+    if path.startswith("/category/"):
+        return True
+    if path in ("/steam", "/fortnite", "/valorant", "/mihoyo", "/epicgames"):
+        return True
+    return False
+
+
+def _api_limit_bucket(method: str, url: str) -> tuple[str, float]:
+    if method.upper() == "GET" and _is_search_endpoint(url):
+        return "search-global", SEARCH_MIN_REQUEST_INTERVAL
+    return "other-global", OTHER_MIN_REQUEST_INTERVAL
+
+
+def _default_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ParsingBot/1.0; +https://api.lzt.market/)",
+        "Referer": "https://zelenka.guru/",
+    }
+    if LZT_API_KEY:
+        headers["Authorization"] = f"Bearer {LZT_API_KEY}"
+    return headers
+
+
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
@@ -882,7 +937,9 @@ async def close_session():
 
 
 async def fetch_items_raw(url: str):
-    headers = {"Authorization": f"Bearer {LZT_API_KEY}"} if LZT_API_KEY else {}
+    bucket, min_interval = _api_limit_bucket("GET", url)
+    await request_rate_limiter.wait(bucket, min_interval)
+    headers = _default_api_headers()
     try:
         session = await get_session()
         async with session.get(url, headers=headers, timeout=FETCH_TIMEOUT) as resp:
@@ -1007,7 +1064,7 @@ async def get_account_buy_balance_text(force: bool = False) -> str:
     if not LZT_API_KEY:
         return "—"
 
-    headers = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
+    headers = _default_api_headers()
     urls = [
         "https://prod-api.lzt.market/balance/exchange",
         "https://api.lzt.market/balance/exchange",
@@ -1364,7 +1421,9 @@ def _autobuy_classify_response(status: int, text: str):
         "insufficient", "not enough", "недостаточно", "уже продан", "already sold",
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
         "forbidden", "access denied", "аккаунт продан",
-        "в очереди на автоматическую покупку", "попробуйте повторить позднее",
+    )
+    queue_markers = (
+        "в очереди", "queue", "queued", "попробуйте повторить позднее",
     )
     auth_error_markers = (
         "api key", "scope", "token", "unauthorized", "authorization", "bearer",
@@ -1384,6 +1443,8 @@ def _autobuy_classify_response(status: int, text: str):
 
     if "secret" in joined or "answer" in joined or "секрет" in joined:
         return "secret", raw[:220], False
+    if any(marker in joined for marker in queue_markers):
+        return "queue", raw[:220], False
     if any(marker in joined for marker in success_markers):
         return "success", raw[:220], False
     if any(marker in joined for marker in terminal_error_markers):
@@ -1417,8 +1478,9 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     t0 = time.perf_counter()
     source_name = (source.get("name") or "UNKNOWN").strip()
     source_url = (source.get("url") or "").strip()
-    headers_json = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json", "Content-Type": "application/json"}
-    headers_form = {"Authorization": f"Bearer {LZT_API_KEY}", "Accept": "application/json"}
+    common_headers = _default_api_headers()
+    headers_json = {**common_headers, "Content-Type": "application/json"}
+    headers_form = dict(common_headers)
     payload_variants = _autobuy_payload_variants(item)
     buy_urls = _autobuy_prioritized_urls(source_url, item_id)
     if AUTOBUY_URL_LIMIT > 0:
@@ -1442,6 +1504,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     async with buy_semaphore:
         if fast_url:
             try:
+                bucket, min_interval = _api_limit_bucket("POST", fast_url)
+                await request_rate_limiter.wait(bucket, min_interval)
                 async with session.post(fast_url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
                     body = await resp.text()
                     state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
@@ -1458,10 +1522,15 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     if state == "terminal":
                         _remember_autobuy_endpoint(source_url, fast_url)
                         return False, f"{fast_url} -> {info}"
-                    last_err = f"{fast_url} -> HTTP {resp.status}: {info}"
+                    if state == "queue":
+                        last_err = f"{fast_url} -> queue: {info}"
+                    else:
+                        last_err = f"{fast_url} -> HTTP {resp.status}: {info}"
 
                     if retry_as_form:
                         try:
+                            bucket, min_interval = _api_limit_bucket("POST", fast_url)
+                            await request_rate_limiter.wait(bucket, min_interval)
                             async with session.post(fast_url, headers=headers_form, data=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as form_resp:
                                 form_body = await form_resp.text()
                                 form_state, form_info, _ = _autobuy_classify_response(form_resp.status, form_body)
@@ -1478,7 +1547,10 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                                 if form_state == "terminal":
                                     _remember_autobuy_endpoint(source_url, fast_url)
                                     return False, f"{fast_url} (form) -> {form_info}"
-                                last_err = f"{fast_url} (form) -> HTTP {form_resp.status}: {form_info}"
+                                if form_state == "queue":
+                                    last_err = f"{fast_url} (form) -> queue: {form_info}"
+                                else:
+                                    last_err = f"{fast_url} (form) -> HTTP {form_resp.status}: {form_info}"
                         except asyncio.TimeoutError:
                             last_err = f"{fast_url} (form) -> fast_buy_timeout"
                         except Exception as e:
@@ -1495,6 +1567,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     continue
                 need_form_retry = False
                 try:
+                    bucket, min_interval = _api_limit_bucket("POST", buy_url)
+                    await request_rate_limiter.wait(bucket, min_interval)
                     async with session.post(buy_url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
                         body = await resp.text()
                         state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
@@ -1515,6 +1589,9 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                         if state == "terminal":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return False, f"{buy_url} -> {info}"
+                        if state == "queue":
+                            last_err = f"{buy_url} -> queue: {info}"
+                            continue
 
                         last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
                         need_form_retry = retry_as_form
@@ -1530,6 +1607,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     continue
 
                 try:
+                    bucket, min_interval = _api_limit_bucket("POST", buy_url)
+                    await request_rate_limiter.wait(bucket, min_interval)
                     async with session.post(buy_url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as form_resp:
                         form_body = await form_resp.text()
                         state, info, _ = _autobuy_classify_response(form_resp.status, form_body)
@@ -1550,6 +1629,9 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                         if state == "terminal":
                             _remember_autobuy_endpoint(source_url, buy_url)
                             return False, f"{buy_url} (form) -> {info}"
+                        if state == "queue":
+                            last_err = f"{buy_url} (form) -> queue: {info}"
+                            continue
 
                         last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
 
@@ -1584,13 +1666,16 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
             terminal = any(x in low for x in [
                 "недостаточно", "already sold", "already purchased", "already bought",
                 "уже продан", "нельзя купить", "секрет", "secret", "auth", "401",
-                "в очереди на автоматическую покупку", "попробуйте повторить позднее", "аккаунт продан",
+                "аккаунт продан",
             ])
             if terminal:
                 return False, f"attempt={attempt}/{attempts} | {info}"
 
             if attempt < attempts:
-                delay = random.uniform(min_delay, max_delay)
+                if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
+                    delay = random.uniform(1.0, 3.0)
+                else:
+                    delay = random.uniform(min_delay, max_delay)
                 log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} attempt={attempt} sleep={delay:.3f}s")
                 await asyncio.sleep(delay)
 
