@@ -35,9 +35,9 @@ OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
-HUNTER_INTERVAL_BASE = 0.08
+HUNTER_INTERVAL_BASE = 0.06
 FETCH_TIMEOUT = 3.20
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.55").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.40").strip())
 RETRY_MAX = 1
 RETRY_BASE_DELAY = 0.30
 
@@ -63,10 +63,12 @@ USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = 0.02
 AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "1").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.06").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.16").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
-AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "2").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.08").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.35").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "1").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "3").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "4.80").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "35").strip())
 
 # ====================== LOGGING ======================
@@ -1462,6 +1464,20 @@ def _sanitize_buy_info_for_user(info: str) -> str:
     return s
 
 
+def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
+    if state in {"auth", "secret", "terminal", "success"}:
+        return True
+    if status in (400, 401, 403, 404, 405):
+        return True
+    low = (info or "").lower()
+    if any(x in low for x in (
+        "already sold", "already purchased", "already bought", "уже продан",
+        "нельзя купить", "недостаточно", "insufficient", "аккаунт продан",
+    )):
+        return True
+    return False
+
+
 async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
     if not LZT_API_KEY:
         return False, "LZT_API_KEY не задан"
@@ -1500,10 +1516,15 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     last_err = "unknown"
     session = await get_session()
+    request_attempts = 0
+    deadline = t0 + max(0.2, AUTOBUY_MAX_DURATION_SEC)
 
     async with buy_semaphore:
         if fast_url:
             try:
+                if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                    return False, last_err
+                request_attempts += 1
                 bucket, min_interval = _api_limit_bucket("POST", fast_url)
                 await request_rate_limiter.wait(bucket, min_interval)
                 async with session.post(fast_url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
@@ -1527,8 +1548,14 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     else:
                         last_err = f"{fast_url} -> HTTP {resp.status}: {info}"
 
+                    if _autobuy_is_terminal_failure(state, resp.status, info):
+                        return False, last_err
+
                     if retry_as_form:
                         try:
+                            if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                                return False, last_err
+                            request_attempts += 1
                             bucket, min_interval = _api_limit_bucket("POST", fast_url)
                             await request_rate_limiter.wait(bucket, min_interval)
                             async with session.post(fast_url, headers=headers_form, data=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as form_resp:
@@ -1551,6 +1578,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                                     last_err = f"{fast_url} (form) -> queue: {form_info}"
                                 else:
                                     last_err = f"{fast_url} (form) -> HTTP {form_resp.status}: {form_info}"
+                                if _autobuy_is_terminal_failure(form_state, form_resp.status, form_info):
+                                    return False, last_err
                         except asyncio.TimeoutError:
                             last_err = f"{fast_url} (form) -> fast_buy_timeout"
                         except Exception as e:
@@ -1567,6 +1596,9 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     continue
                 need_form_retry = False
                 try:
+                    if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                        return False, last_err
+                    request_attempts += 1
                     bucket, min_interval = _api_limit_bucket("POST", buy_url)
                     await request_rate_limiter.wait(bucket, min_interval)
                     async with session.post(buy_url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
@@ -1594,6 +1626,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                             continue
 
                         last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
+                        if _autobuy_is_terminal_failure(state, resp.status, info):
+                            return False, last_err
                         need_form_retry = retry_as_form
 
                 except asyncio.TimeoutError:
@@ -1607,6 +1641,9 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     continue
 
                 try:
+                    if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                        return False, last_err
+                    request_attempts += 1
                     bucket, min_interval = _api_limit_bucket("POST", buy_url)
                     await request_rate_limiter.wait(bucket, min_interval)
                     async with session.post(buy_url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as form_resp:
@@ -1634,6 +1671,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                             continue
 
                         last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
+                        if _autobuy_is_terminal_failure(state, form_resp.status, info):
+                            return False, last_err
 
                 except asyncio.TimeoutError:
                     last_err = f"{buy_url} (form) -> buy_timeout"
@@ -1673,7 +1712,7 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
 
             if attempt < attempts:
                 if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
-                    delay = random.uniform(1.0, 3.0)
+                    delay = random.uniform(0.20, 0.60)
                 else:
                     delay = random.uniform(min_delay, max_delay)
                 log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} attempt={attempt} sleep={delay:.3f}s")
