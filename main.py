@@ -37,7 +37,7 @@ OWNER_IDS = {OWNER_ID}
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = 0.08
 FETCH_TIMEOUT = 3.20
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "1.80").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.55").strip())
 RETRY_MAX = 1
 RETRY_BASE_DELAY = 0.30
 
@@ -50,8 +50,8 @@ MAX_URLS_PER_USER_LIMITED = 3
 MAX_CONCURRENT_REQUESTS = 20
 LIMITED_EXTRA_DELAY = 3.0
 MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "20").strip())
-SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "3.0").strip())
-OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.2").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.30").strip())
+OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.03").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -62,11 +62,11 @@ URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = 0.02
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "1").strip())
 AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.06").strip())
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.16").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.85").strip())
-AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "4").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "2").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "35").strip())
 
 # ====================== LOGGING ======================
