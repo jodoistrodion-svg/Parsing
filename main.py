@@ -591,7 +591,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
           <input type="number" min="1" max="1000" id="maxItems" />
           <div style="height:8px"></div>
           <label class="muted">Таймаут запроса (мс)</label>
-          <input type="number" min="150" max="30000" id="timeoutMs" />
+          <input type="number" min="500" max="30000" id="timeoutMs" />
           <div style="height:8px"></div>
           <label class="muted">Скорость автобая (мс между попытками)</label>
           <input type="number" min="0" max="10000" id="autobuyDelayMs" />
@@ -642,7 +642,7 @@ const DEFAULTS = {
   settings: {
     intervalSec: 1,
     maxItemsPerSource: 1,
-    timeoutMs: 150,
+    timeoutMs: 4000,
     autobuyDelayMs: 0,
     notifications: false
   }
@@ -650,6 +650,11 @@ const DEFAULTS = {
 
 const state = loadState();
 let hunterTimer = null;
+
+if(!Number.isFinite(Number(state.settings.timeoutMs)) || Number(state.settings.timeoutMs) < 500){
+  state.settings.timeoutMs = 4000;
+  saveState();
+}
 
 function deepClone(v){ return JSON.parse(JSON.stringify(v)); }
 function loadState(){
@@ -873,7 +878,11 @@ function makeLot(item, source){
 
 async function fetchWithTimeout(url, timeoutMs){
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, timeoutMs);
   try {
     const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
     const text = await res.text();
@@ -890,6 +899,11 @@ async function fetchWithTimeout(url, timeoutMs){
     }
 
     return payload;
+  } catch (err) {
+    if(timedOut){
+      throw new Error(`Превышен таймаут ${timeoutMs} мс. Увеличь «Таймаут запроса» в настройках.`);
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -1064,7 +1078,7 @@ async function testSourceUrl(){
   if(!/^https?:\/\//i.test(url)){ msg.textContent = 'Введите корректный URL.'; return; }
   msg.textContent = 'Проверка...';
   try {
-    const data = await fetchWithTimeout(url, Math.min(4000, state.settings.timeoutMs));
+    const data = await fetchWithTimeout(url, Math.max(4000, state.settings.timeoutMs));
     const items = normalizeItems(data);
     msg.textContent = `OK: доступен, найдено элементов: ${items.length}`;
   } catch(err){
@@ -1080,7 +1094,7 @@ async function testSourceUrl(){
 function saveSettings(){
   state.settings.intervalSec = clamp(Number(document.getElementById('scanInterval').value) || 1, 1, 600);
   state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 1, 1, 1000);
-  state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 150, 150, 30000);
+  state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 4000, 500, 30000);
   state.settings.autobuyDelayMs = clamp(Number(document.getElementById('autobuyDelayMs').value) || 0, 0, 10000);
   saveState();
   toast('Настройки сохранены', 'ok');
@@ -1096,7 +1110,7 @@ function saveSettings(){
 function applyMinPreset(){
   document.getElementById('scanInterval').value = 1;
   document.getElementById('maxItems').value = 1;
-  document.getElementById('timeoutMs').value = 150;
+  document.getElementById('timeoutMs').value = 4000;
   document.getElementById('autobuyDelayMs').value = 0;
   saveSettings();
 }
