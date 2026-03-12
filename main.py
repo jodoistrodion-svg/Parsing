@@ -595,6 +595,9 @@ APP_TEMPLATE_HTML = """<!doctype html>
           <div style="height:8px"></div>
           <label class="muted">Скорость автобая (мс между попытками)</label>
           <input type="number" min="0" max="10000" id="autobuyDelayMs" />
+          <div style="height:8px"></div>
+          <label class="muted">API токен LZT (опционально, для приватных ответов API)</label>
+          <input type="password" id="apiToken" placeholder="Bearer token, без слова Bearer" autocomplete="off" />
 
           <div class="row" style="margin-top:8px">
             <button class="btn-ok" onclick="saveSettings()">💾 Сохранить</button>
@@ -644,6 +647,7 @@ const DEFAULTS = {
     maxItemsPerSource: 1,
     timeoutMs: 4000,
     autobuyDelayMs: 0,
+    apiToken: '',
     notifications: false
   }
 };
@@ -884,7 +888,9 @@ async function fetchWithTimeout(url, timeoutMs){
     ctrl.abort();
   }, timeoutMs);
   try {
-    const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+    const token = String(state.settings.apiToken || '').trim();
+    const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+    const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal, headers });
     const text = await res.text();
     let payload = null;
     try { payload = text ? JSON.parse(text) : null; } catch {}
@@ -1096,6 +1102,7 @@ function saveSettings(){
   state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 1, 1, 1000);
   state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 4000, 500, 30000);
   state.settings.autobuyDelayMs = clamp(Number(document.getElementById('autobuyDelayMs').value) || 0, 0, 10000);
+  state.settings.apiToken = String(document.getElementById('apiToken').value || '').trim();
   saveState();
   toast('Настройки сохранены', 'ok');
   if(hunterTimer){
@@ -1112,6 +1119,7 @@ function applyMinPreset(){
   document.getElementById('maxItems').value = 1;
   document.getElementById('timeoutMs').value = 4000;
   document.getElementById('autobuyDelayMs').value = 0;
+  document.getElementById('apiToken').value = '';
   saveSettings();
 }
 
@@ -1330,6 +1338,7 @@ function init(){
   document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
   document.getElementById('timeoutMs').value = state.settings.timeoutMs;
   document.getElementById('autobuyDelayMs').value = state.settings.autobuyDelayMs ?? 0;
+  document.getElementById('apiToken').value = state.settings.apiToken || '';
   document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
   syncAutobuyAllBtn();
 
