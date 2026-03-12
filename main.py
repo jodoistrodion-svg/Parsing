@@ -633,7 +633,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
 <script>
 const STORE_KEY = 'parsing_hunter_store_v2';
 const DEFAULTS = {
-  sources: [],
+  sources: __SEED_SOURCES__,
   seen: {},
   lots: [],
   logs: [],
@@ -1323,7 +1323,26 @@ def kb_urls_menu() -> ReplyKeyboardMarkup:
 
 
 
-def ensure_app_bundle(kind: str) -> Path:
+def _build_app_template_for_user(seed_sources: list[dict] | None = None) -> str:
+    prepared_sources: list[dict] = []
+    for src in seed_sources or []:
+        url = str(src.get("url") or "").strip()
+        if not url:
+            continue
+        prepared_sources.append(
+            {
+                "id": str(src.get("id") or f"seed-{abs(hash(url))}"),
+                "name": str(src.get("name") or "Без названия").strip() or "Без названия",
+                "url": url,
+                "enabled": bool(src.get("enabled", True)),
+                "autobuy": bool(src.get("autobuy", False)),
+                "addedAt": int(time.time() * 1000),
+            }
+        )
+    return APP_TEMPLATE_HTML.replace("__SEED_SOURCES__", json.dumps(prepared_sources, ensure_ascii=False), 1)
+
+
+def ensure_app_bundle(kind: str, seed_sources: list[dict] | None = None) -> Path:
     apps_dir = Path("apps")
     apps_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1336,16 +1355,17 @@ def ensure_app_bundle(kind: str) -> Path:
         raise ValueError("unknown app kind")
 
     app_path = apps_dir / filename
-    app_path.write_text(APP_TEMPLATE_HTML, encoding="utf-8")
+    app_path.write_text(_build_app_template_for_user(seed_sources), encoding="utf-8")
     return app_path
 
 
-async def send_app_file(chat_id: int, kind: str):
+async def send_app_file(chat_id: int, user_id: int, kind: str):
     if bot is None:
         return
 
     try:
-        app_path = ensure_app_bundle(kind)
+        seed_sources = await db_get_urls(user_id)
+        app_path = ensure_app_bundle(kind, seed_sources=seed_sources)
     except ValueError:
         await send_bot_message(chat_id, "❌ Неизвестный тип приложения.")
         return
@@ -3621,11 +3641,11 @@ async def buttons_handler(message: types.Message):
             return await safe_delete(message)
 
         if text == "📱 Приложение Android":
-            await send_app_file(chat_id, "android")
+            await send_app_file(chat_id, user_id, "android")
             return await safe_delete(message)
 
         if text == "🖥 Приложение Windows":
-            await send_app_file(chat_id, "windows")
+            await send_app_file(chat_id, user_id, "windows")
             return await safe_delete(message)
 
         if text == "🚀 Старт охотника":
