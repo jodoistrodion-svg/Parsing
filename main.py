@@ -407,6 +407,52 @@ APP_TEMPLATE_HTML = """<!doctype html>
       padding-right: 4px;
     }
 
+    .chat-shell {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #230d16;
+      padding: 10px;
+      min-height: 260px;
+      max-height: 52vh;
+      overflow: auto;
+    }
+
+    .chat-bubble {
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      line-height: 1.4;
+      border: 1px solid var(--line);
+      max-width: 92%;
+      white-space: pre-wrap;
+    }
+
+    .chat-bubble.user {
+      margin-left: auto;
+      background: #4a1628;
+      border-color: #8f3858;
+    }
+
+    .chat-bubble.ai {
+      margin-right: auto;
+      background: #25101d;
+      border-color: #663149;
+      color: #ffe3eb;
+    }
+
+    .quick-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .quick-grid button {
+      padding: 8px 10px;
+      font-size: 12px;
+      background: #341321;
+    }
+
     .footer-note { margin-top: 12px; color: var(--muted); font-size: 12px; text-align: center; }
 
     @media (max-width: 700px) {
@@ -435,6 +481,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">🏠 Дашборд</button>
       <button class="tab" data-tab="sources" onclick="switchTab('sources')">🔗 Источники</button>
       <button class="tab" data-tab="lots" onclick="switchTab('lots')">🧾 Лоты</button>
+      <button class="tab" data-tab="ai" onclick="switchTab('ai')">🧠 AI-чат</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">⚙️ Настройки</button>
     </div>
 
@@ -461,9 +508,9 @@ APP_TEMPLATE_HTML = """<!doctype html>
           <div class="muted">Быстрые кнопки управления и переходов.</div>
           <div class="row" style="margin-top:8px">
             <button class="btn-ok" onclick="toggleAutobuyAll()" id="dashAutobuyBtn">🔴 Автобай на всех ссылках: ВЫКЛ</button>
-            <a class="link-btn" href="https://t.me/StaliNusshhAaaaaa" target="_blank" rel="noopener noreferrer">🤖 Открыть Telegram-бота</a>
+            <button class="link-btn" onclick="openTelegramBot()">🤖 Открыть Telegram-бота</button>
+            <button class="link-btn" onclick="switchTab('ai')">🧠 Открыть AI-чат</button>
             <a class="link-btn" href="https://t.me/+wHlSL7Ij2rpjYmFi" target="_blank" rel="noopener noreferrer">🛟 Канал поддержки</a>
-            <a class="link-btn" href="https://github.com" target="_blank" rel="noopener noreferrer">🧬 Репозиторий кода</a>
           </div>
         </article>
 
@@ -509,6 +556,28 @@ APP_TEMPLATE_HTML = """<!doctype html>
         </div>
         <div id="lotList" class="list muted"></div>
       </article>
+    </section>
+
+
+    <section id="ai" class="panel">
+      <div class="grid">
+        <article class="card">
+          <h3>Нейро-помощник</h3>
+          <div class="muted">Простая встроенная нейросеть (без API) отвечает на базовые вопросы: по приложению, настройкам, безопасности, а также на общие темы.</div>
+          <div id="aiChat" class="chat-shell" style="margin-top:10px"></div>
+          <div class="row" style="margin-top:8px">
+            <input id="aiInput" placeholder="Напиши вопрос..." onkeydown="if(event.key==='Enter'){event.preventDefault();askAIFromInput();}" />
+            <button class="btn-accent" onclick="askAIFromInput()">Отправить</button>
+          </div>
+          <div class="quick-grid">
+            <button onclick="askAI('Как добавить URL?')">Как добавить URL?</button>
+            <button onclick="askAI('Как работает автобай?')">Как работает автобай?</button>
+            <button onclick="askAI('Как улучшить безопасность?')">Безопасность</button>
+            <button onclick="askAI('Что делать если ничего не находит?')">Нет новых лотов</button>
+            <button onclick="askAI('Дай мотивацию')">Мотивация</button>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section id="settings" class="panel">
@@ -568,6 +637,7 @@ const DEFAULTS = {
   seen: {},
   lots: [],
   logs: [],
+  aiHistory: [],
   metrics: { newCount: 0, scans: 0, errors: 0 },
   settings: {
     intervalSec: 1,
@@ -593,6 +663,7 @@ function loadState(){
       sources: Array.isArray(raw.sources) ? raw.sources : [],
       lots: Array.isArray(raw.lots) ? raw.lots : [],
       logs: Array.isArray(raw.logs) ? raw.logs : [],
+      aiHistory: Array.isArray(raw.aiHistory) ? raw.aiHistory : [],
       seen: raw.seen && typeof raw.seen === 'object' ? raw.seen : {}
     };
   } catch {
@@ -1017,6 +1088,150 @@ function cryptoRandomId(){ return Math.random().toString(36).slice(2, 10) + Date
 function escapeHtml(s){ return String(s).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
 function escapeAttr(s){ return escapeHtml(s).replace(/'/g, '&#39;'); }
 
+
+const TELEGRAM_BOT_LINK = 'https://t.me/StaliNusshhAaaaaa';
+
+const neuralBrain = {
+  intents: [
+    {
+      name: 'greeting',
+      keywords: ['привет','здарова','hello','hi','добрый','вечер','утро'],
+      answers: ['Привет! Я встроенный AI-помощник Parsing Hunter.','Привет 👋 Спроси меня про URL, автобай, сканирование или общие базовые вопросы.']
+    },
+    {
+      name: 'add_url',
+      keywords: ['добавить','url','ссылк','источник','api'],
+      answers: ['Открой вкладку «Источники» → вставь API URL → нажми «Добавить». Потом включи источник и запусти охотника.','Чтобы добавить источник: укажи название, вставь API URL и нажми «➕ Добавить».']
+    },
+    {
+      name: 'autobuy',
+      keywords: ['автобай','купить','покупк','buy','авто'],
+      answers: ['Автобай включается у каждого источника отдельно или кнопкой «на всех ссылках». Следи за балансом и лимитами.','Режим автобая пытается покупать новые лоты автоматически. Для старта активируй его у нужных URL.']
+    },
+    {
+      name: 'scan',
+      keywords: ['скан','охотник','провер','новые лоты','не находит'],
+      answers: ['Если лотов нет: проверь URL, тест URL, включён ли источник и не слишком ли маленький timeout.','Запусти «Проверить сейчас» для ручного поиска или «Охотника» для непрерывного мониторинга.']
+    },
+    {
+      name: 'security',
+      keywords: ['безопас','ключ','token','токен','api key','секрет'],
+      answers: ['Никому не передавай API-ключи и токены, используй переменные окружения и регулярно обновляй секреты.','Безопасность: хранить токены вне публичного кода, ограничивать доступ и периодически менять ключи.']
+    },
+    {
+      name: 'motivation',
+      keywords: ['мотивац','устал','лень','помоги','поддержи'],
+      answers: ['Маленький шаг сейчас лучше идеального плана завтра. Сделай 1 действие: проверь 1 URL.','Ты уже дошёл сюда — осталось чуть-чуть. Сфокусируйся на следующем маленьком шаге 💪']
+    }
+  ],
+  fallback: [
+    'Я пока отвечаю на базовом уровне. Попробуй переформулировать вопрос короче и конкретнее.',
+    'Не до конца понял запрос. Могу помочь по URL, сканированию, автобаю, настройкам и безопасности.'
+  ]
+};
+
+const neuralVocabulary = [...new Set(neuralBrain.intents.flatMap(intent => intent.keywords))];
+const neuralWeights = neuralBrain.intents.map(intent => neuralVocabulary.map(word => intent.keywords.some(k => word === k) ? 1 : 0));
+
+function tokenize(text){
+  return String(text || '').toLowerCase().replace(/[^a-zа-яё0-9\s]/gi, ' ').split(/\s+/).filter(Boolean);
+}
+
+function vectorize(text){
+  const words = tokenize(text);
+  const total = Math.max(words.length, 1);
+  return neuralVocabulary.map(word => {
+    let count = 0;
+    for(const token of words){
+      if(token.includes(word) || word.includes(token)) count += 1;
+    }
+    return count / total;
+  });
+}
+
+function predictIntent(text){
+  const x = vectorize(text);
+  let bestScore = 0;
+  let bestIntent = null;
+
+  for(let i = 0; i < neuralWeights.length; i += 1){
+    const w = neuralWeights[i];
+    let score = 0;
+    for(let j = 0; j < x.length; j += 1){
+      score += x[j] * w[j];
+    }
+    if(score > bestScore){
+      bestScore = score;
+      bestIntent = neuralBrain.intents[i];
+    }
+  }
+
+  if(!bestIntent || bestScore < 0.16) return null;
+  return bestIntent;
+}
+
+function aiRespond(question){
+  const q = String(question || '').trim();
+  if(!q) return 'Напиши вопрос, и я постараюсь помочь.';
+  const intent = predictIntent(q);
+  if(!intent){
+    return neuralBrain.fallback[Math.floor(Math.random() * neuralBrain.fallback.length)];
+  }
+  return intent.answers[Math.floor(Math.random() * intent.answers.length)];
+}
+
+function addChatMessage(role, text){
+  state.aiHistory.push({ role, text: String(text || ''), t: Date.now() });
+  if(state.aiHistory.length > 120) state.aiHistory = state.aiHistory.slice(-120);
+  saveState();
+  renderAIChat();
+}
+
+function renderAIChat(){
+  const box = document.getElementById('aiChat');
+  if(!box) return;
+
+  if(!state.aiHistory.length){
+    box.innerHTML = '<div class="chat-bubble ai">Привет! Я локальный AI-ассистент. Спроси меня что-нибудь 👋</div>';
+    return;
+  }
+
+  box.innerHTML = state.aiHistory.map(m => `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'ai'}">${escapeHtml(m.text)}</div>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function askAI(question){
+  const q = String(question || '').trim();
+  if(!q) return;
+  addChatMessage('user', q);
+  const answer = aiRespond(q);
+  addChatMessage('ai', answer);
+}
+
+function askAIFromInput(){
+  const input = document.getElementById('aiInput');
+  if(!input) return;
+  const text = String(input.value || '').trim();
+  if(!text) return;
+  input.value = '';
+  askAI(text);
+}
+
+function openTelegramBot(){
+  const url = TELEGRAM_BOT_LINK;
+  try {
+    if(window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.openTelegramLink === 'function'){
+      window.Telegram.WebApp.openTelegramLink(url);
+      return;
+    }
+  } catch {}
+
+  const win = window.open(url, '_blank', 'noopener,noreferrer');
+  if(!win){
+    window.location.href = url;
+  }
+}
+
 function init(){
   document.getElementById('scanInterval').value = state.settings.intervalSec;
   document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
@@ -1028,6 +1243,7 @@ function init(){
   renderSources();
   renderLots();
   renderLogs();
+  renderAIChat();
   updateMetrics();
   setStatus('Приложение готово к работе.', 'ok');
 }
