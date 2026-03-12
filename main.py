@@ -697,13 +697,60 @@ function switchTab(tab){
 }
 
 function cleanUrl(url){ return String(url || '').trim(); }
+
+function normalizeSourceUrl(rawUrl){
+  const input = cleanUrl(rawUrl).replace(/\s+/g, '');
+  if(!input) return '';
+
+  let parsed;
+  try {
+    parsed = new URL(input);
+  } catch {
+    return input;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const hostAliases = {
+    'lzt.market': 'api.lzt.market',
+    'www.lzt.market': 'api.lzt.market',
+    'api.lolz.guru': 'api.lzt.market'
+  };
+
+  if(hostAliases[host]) parsed.hostname = hostAliases[host];
+
+  const fixes = [
+    ['genshinlevelmin', 'genshin_level_min'],
+    ['genshinlevel_min', 'genshin_level_min'],
+    ['genshin_levelmin', 'genshin_level_min'],
+    ['brawl_cupmin', 'brawl_cup_min'],
+    ['clash_cupmin', 'clash_cup_min'],
+    ['clashcupmin', 'clash_cup_min'],
+    ['clashcupmax', 'clash_cup_max'],
+    ['clash_cupmax', 'clash_cup_max'],
+    ['orderby', 'order_by']
+  ];
+
+  for(const [from, to] of fixes){
+    if(parsed.search.includes(from)){
+      parsed.search = parsed.search.split(from).join(to);
+    }
+  }
+
+  const orderBy = parsed.searchParams.get('order_by');
+  if(!orderBy || !String(orderBy).trim()){
+    parsed.searchParams.set('order_by', 'pdate_to_down_upload');
+  }
+
+  return parsed.toString();
+}
+
 function sourceKey(src){ return src.url; }
 
 function addSource(){
   const nameEl = document.getElementById('sourceName');
   const urlEl = document.getElementById('sourceUrl');
   const name = (nameEl.value || '').trim() || 'Без названия';
-  const url = cleanUrl(urlEl.value);
+  const url = normalizeSourceUrl(urlEl.value);
 
   if(!/^https?:\/\//i.test(url)) return toast('Некорректный URL', 'err');
   if(state.sources.some(s => s.url === url)) return toast('Этот источник уже добавлен', 'warn');
@@ -829,8 +876,20 @@ async function fetchWithTimeout(url, timeoutMs){
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
-    return await res.json();
+    const text = await res.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+
+    if(!res.ok){
+      const apiMessage = payload && (payload.error_description || payload.error || payload.message);
+      throw new Error(apiMessage ? `HTTP ${res.status}: ${apiMessage}` : ('HTTP ' + res.status));
+    }
+
+    if(payload === null){
+      throw new Error('API вернул пустой ответ');
+    }
+
+    return payload;
   } finally {
     clearTimeout(timer);
   }
@@ -1001,7 +1060,7 @@ function clearSeen(){
 
 async function testSourceUrl(){
   const msg = document.getElementById('sourceTestMsg');
-  const url = cleanUrl(document.getElementById('sourceUrl').value);
+  const url = normalizeSourceUrl(document.getElementById('sourceUrl').value);
   if(!/^https?:\/\//i.test(url)){ msg.textContent = 'Введите корректный URL.'; return; }
   msg.textContent = 'Проверка...';
   try {
@@ -1009,7 +1068,12 @@ async function testSourceUrl(){
     const items = normalizeItems(data);
     msg.textContent = `OK: доступен, найдено элементов: ${items.length}`;
   } catch(err){
-    msg.textContent = `Ошибка: ${String(err.message || err)}`;
+    const text = String(err.message || err);
+    if(/failed to fetch/i.test(text)){
+      msg.textContent = 'Ошибка: Failed to fetch. Обычно это блокировка CORS/сети. Попробуй API-ссылку вида https://api.lzt.market/...';
+      return;
+    }
+    msg.textContent = `Ошибка: ${text}`;
   }
 }
 
@@ -1245,6 +1309,9 @@ function openTelegramBot(){
 }
 
 function init(){
+  state.sources = state.sources.map(src => ({ ...src, url: normalizeSourceUrl(src.url) }));
+  saveState();
+
   document.getElementById('scanInterval').value = state.settings.intervalSec;
   document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
   document.getElementById('timeoutMs').value = state.settings.timeoutMs;
