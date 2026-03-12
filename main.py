@@ -736,7 +736,10 @@ function normalizeSourceUrl(rawUrl){
     ['clashcupmin', 'clash_cup_min'],
     ['clashcupmax', 'clash_cup_max'],
     ['clash_cupmax', 'clash_cup_max'],
-    ['orderby', 'order_by']
+    ['orderby', 'order_by'],
+    ['order_by=pdate_to_down_upoad', 'order_by=pdate_to_down_upload'],
+    ['order_by=pdate_to_down_up', 'order_by=pdate_to_down_upload'],
+    ['order_by=pdate_to_downupload', 'order_by=pdate_to_down_upload']
   ];
 
   for(const [from, to] of fixes){
