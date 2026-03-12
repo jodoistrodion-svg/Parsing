@@ -35,11 +35,11 @@ OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
-HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.005").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "1.80").strip())
+HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.0").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "1.20").strip())
 BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.14").strip())
-RETRY_MAX = int((os.getenv("RETRY_MAX") or "2").strip())
-RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.08").strip())
+RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
+RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
 
 SHORT_CARD_MAX = 3200
 ERROR_REPORT_INTERVAL = 3600
@@ -47,10 +47,10 @@ ERROR_REPORT_INTERVAL = 3600
 MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
-MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "160").strip())
-LIMITED_EXTRA_DELAY = 3.0
-MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "120").strip())
-SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.005").strip())
+MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "512").strip())
+LIMITED_EXTRA_DELAY = 0.0
+MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "1000").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.0").strip())
 OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
@@ -67,11 +67,11 @@ AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.001").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.06").strip())
-AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "3").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.04").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0").strip())
-MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "60").strip())
+MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
