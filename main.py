@@ -1602,6 +1602,7 @@ user_api_errors = defaultdict(int)
 user_roles = defaultdict(lambda: "unknown")
 
 user_last_screen_msg_id = defaultdict(lambda: None)
+user_no_lots_msg_id = defaultdict(lambda: None)
 user_pending_url = defaultdict(lambda: None)
 user_pending_rename_url = defaultdict(lambda: None)
 user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
@@ -1649,6 +1650,37 @@ async def send_screen(chat_id: int, user_id: int, text: str, reply_markup: Reply
     )
     user_last_screen_msg_id[user_id] = msg.message_id
     return msg
+
+
+async def upsert_no_lots_message(chat_id: int, user_id: int, text: str):
+    if bot is None:
+        return
+
+    mid = user_no_lots_msg_id.get(user_id)
+    if mid:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=mid,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        except TelegramBadRequest:
+            pass
+        except Exception:
+            pass
+
+    try:
+        msg = await send_bot_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        user_no_lots_msg_id[user_id] = msg.message_id
+    except Exception:
+        pass
+
+
+def reset_no_lots_message(user_id: int):
+    user_no_lots_msg_id[user_id] = None
 
 
 def build_urls_picker_kb(sources: list[dict], page: int, back_text: str = "⬅️ Назад") -> ReplyKeyboardMarkup:
@@ -3189,6 +3221,7 @@ async def seed_existing_without_notifications(user_id: int):
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     ensure_notify_worker(user_id)
+    no_lots_streak = 0
     while user_search_active[user_id]:
         seen_batch = []
         buy_attempt_batch = []
@@ -3243,12 +3276,31 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     seen_batch.append(key)
                     new_items_processed += 1
 
-                    enqueue_hunter_notification(user_id, chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                    try:
+                        await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception as e:
+                        log_autobuy(f"LOT_NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
                     if buy_result_text:
                         enqueue_hunter_notification(user_id, chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
 
                 if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
                     break
+
+            if new_items_processed == 0:
+                no_lots_streak += 1
+                ts = time.strftime("%H:%M:%S", time.localtime())
+                await upsert_no_lots_message(
+                    chat_id,
+                    user_id,
+                    (
+                        "ℹ️ <b>Новых лотов пока нет</b>\n"
+                        f"• Обновлено: <b>{ts}</b>\n"
+                        f"• Пустых циклов подряд: <b>{no_lots_streak}</b>"
+                    ),
+                )
+            else:
+                no_lots_streak = 0
+                reset_no_lots_message(user_id)
 
             await db_mark_seen_batch(user_id, seen_batch)
             await db_mark_buy_attempted_batch(user_id, buy_attempt_batch)
