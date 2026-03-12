@@ -8,12 +8,13 @@ import re
 import time
 import random
 import os
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
 
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
@@ -148,6 +149,165 @@ START_MSG_2 = (
     "• ♻️ Сбросить историю — считать все лоты снова новыми"
 )
 
+APP_TEMPLATE_HTML = """<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Parsing Hunter App</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090b14;
+      --card: #131a2d;
+      --line: #263557;
+      --text: #f2f7ff;
+      --muted: #9eb3d4;
+      --accent: #6db3ff;
+      --ok: #54e1a2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: radial-gradient(circle at top, #15254d, var(--bg) 40%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 18px;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    .hero, .card { background: rgba(19,26,45,.88); border: 1px solid var(--line); border-radius: 18px; backdrop-filter: blur(8px); }
+    .hero { padding: 20px; margin-bottom: 16px; }
+    .hero h1 { margin: 0 0 8px; font-size: 24px; }
+    .hero p { margin: 0; color: var(--muted); }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { padding: 14px; }
+    .card h3 { margin: 0 0 8px; font-size: 15px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+    input, button {
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #0f1527;
+      color: var(--text);
+      padding: 10px;
+    }
+    input { width: 100%; }
+    button { cursor: pointer; transition: .2s ease; }
+    button:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .accent { background: linear-gradient(90deg, #2f7fff, #5f8bff); border: 0; }
+    .ok { color: var(--ok); }
+    .muted { color: var(--muted); font-size: 13px; }
+    #lots { max-height: 55vh; overflow: auto; display: grid; gap: 8px; }
+    .lot { border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: #10192b; }
+    .lot a { color: var(--accent); text-decoration: none; }
+    .badge { background: #182749; padding: 3px 8px; border-radius: 999px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>⚡ Parsing Hunter App</h1>
+      <p>Локальное приложение для Android/Windows. Работает как бот: мониторит URL, показывает новые лоты и ведёт историю.</p>
+    </section>
+    <section class="grid">
+      <article class="card">
+        <h3>1) API URL источников</h3>
+        <input id="urlInput" placeholder="Вставь API URL и нажми Добавить" />
+        <div class="row">
+          <button class="accent" onclick="addUrl()">➕ Добавить</button>
+          <button onclick="toggleRun()">🚀 Старт/Стоп</button>
+          <button onclick="resetSeen()">♻️ Сбросить историю</button>
+        </div>
+        <div id="sources" class="muted"></div>
+      </article>
+      <article class="card">
+        <h3>2) Статус</h3>
+        <div id="status" class="muted">Остановлено</div>
+        <div class="row">
+          <span class="badge">Цикл: 5 сек</span>
+          <span class="badge">Новые лоты: <span id="newCount">0</span></span>
+        </div>
+      </article>
+    </section>
+    <section class="card" style="margin-top: 12px;">
+      <h3>🧾 Новые лоты</h3>
+      <div id="lots"></div>
+    </section>
+  </main>
+<script>
+  const STORE_KEY = 'parsing_hunter_store_v1';
+  const state = JSON.parse(localStorage.getItem(STORE_KEY) || '{"urls":[],"seen":{}}');
+  let timer = null;
+  let newCount = 0;
+
+  function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(state)); renderSources(); }
+  function renderSources(){
+    const box = document.getElementById('sources');
+    if(!state.urls.length){ box.textContent = 'Источники не добавлены'; return; }
+    box.innerHTML = state.urls.map((u, i) => `${i + 1}. ${u}`).join('<br>');
+  }
+  function addUrl(){
+    const el = document.getElementById('urlInput');
+    const url = el.value.trim();
+    if(!url || !/^https?:\/\//i.test(url)) return alert('Некорректный URL');
+    if(state.urls.includes(url)) return;
+    state.urls.push(url); el.value = ''; save();
+  }
+  function resetSeen(){ state.seen = {}; save(); setStatus('История очищена', true); }
+  function setStatus(t, ok=false){
+    const s = document.getElementById('status');
+    s.textContent = t;
+    s.className = ok ? 'ok' : 'muted';
+  }
+  function addLotCard(item, source){
+    const lots = document.getElementById('lots');
+    const id = item.item_id || item.id || item.itemId || Math.random().toString(16).slice(2);
+    const title = item.title || item.name || `Лот ${id}`;
+    const price = item.price ?? item.amount ?? '—';
+    const link = item.url || item.link || '#';
+    const div = document.createElement('div');
+    div.className = 'lot';
+    div.innerHTML = `<b>${title}</b><br><span class='muted'>Источник: ${source}</span><br>💰 ${price}<br><a href='${link}' target='_blank'>Открыть</a>`;
+    lots.prepend(div);
+  }
+  async function scanOnce(){
+    if(!state.urls.length){ setStatus('Добавь хотя бы один URL'); return; }
+    setStatus('Сканирование...');
+    let found = 0;
+    for(const url of state.urls){
+      try {
+        const res = await fetch(url, {cache:'no-store'});
+        if(!res.ok) continue;
+        const data = await res.json();
+        const items = data.items || data.data?.items || data.results || [];
+        for(const item of items){
+          const id = String(item.item_id || item.id || item.itemId || '');
+          if(!id) continue;
+          if(!state.seen[url]) state.seen[url] = {};
+          if(state.seen[url][id]) continue;
+          state.seen[url][id] = 1;
+          found += 1;
+          newCount += 1;
+          addLotCard(item, url);
+        }
+      } catch (e) {}
+    }
+    document.getElementById('newCount').textContent = String(newCount);
+    setStatus(found ? `Найдено новых: ${found}` : 'Новых лотов не найдено', true);
+    save();
+  }
+  function toggleRun(){
+    if(timer){ clearInterval(timer); timer = null; setStatus('Остановлено'); return; }
+    scanOnce();
+    timer = setInterval(scanOnce, 5000);
+    setStatus('Охотник запущен', true);
+  }
+  renderSources();
+</script>
+</body>
+</html>
+"""
+
 
 WELCOME_STICKERS = [
     "CAACAgIAAxkBAAIBQmYkJ4hB5lL0QwABJvY5S4UuTxR1xAACZQADwDZPE9xKkS4L5N5eNgQ",
@@ -183,6 +343,7 @@ def kb_main(user_id: int) -> ReplyKeyboardMarkup:
         [kb_button("🚀 Старт охотника", "success"), kb_button("🛑 Стоп охотника")],
         [kb_button("✨ Проверка лотов", "primary"), kb_button("📊 Статус")],
         [kb_button("📚 Мои URL", "primary"), kb_button("♻️ Сбросить историю")],
+        [kb_button("📱 Приложение Android"), kb_button("🖥 Приложение Windows")],
         [kb_button("ℹ️ Инфо")],
     ]
     if user_id in OWNER_IDS:
@@ -202,6 +363,48 @@ def kb_urls_menu() -> ReplyKeyboardMarkup:
     )
 
 
+
+
+def ensure_app_bundle(kind: str) -> Path:
+    apps_dir = Path("apps")
+    apps_dir.mkdir(parents=True, exist_ok=True)
+
+    normalized = (kind or "").strip().lower()
+    if normalized in {"android", "андроид", "android apk", "apk"}:
+        filename = "parsing_hunter_android.html"
+    elif normalized in {"windows", "виндовс", "windows exe", "win"}:
+        filename = "parsing_hunter_windows.html"
+    else:
+        raise ValueError("unknown app kind")
+
+    app_path = apps_dir / filename
+    if not app_path.exists():
+        app_path.write_text(APP_TEMPLATE_HTML, encoding="utf-8")
+    return app_path
+
+
+async def send_app_file(chat_id: int, kind: str):
+    if bot is None:
+        return
+
+    try:
+        app_path = ensure_app_bundle(kind)
+    except ValueError:
+        await send_bot_message(chat_id, "❌ Неизвестный тип приложения.")
+        return
+
+    caption = (
+        f"📦 Готово: файл для <b>{'Android' if 'android' in app_path.name else 'Windows'}</b>\n"
+        "Это офлайн-приложение с красивым интерфейсом: добавь API URL и запусти охотника.\n"
+        "Открой файл в браузере на устройстве или упакуй в WebView/desktop-shell."
+    )
+
+    await bot.send_document(
+        chat_id,
+        FSInputFile(str(app_path)),
+        caption=caption,
+        parse_mode="HTML",
+    )
 def _to_bool_label(value) -> str | None:
     if value is None:
         return None
@@ -2382,7 +2585,8 @@ async def buttons_handler(message: types.Message):
                 "ℹ️ Управление только нижними кнопками.\n"
                 "📚 Мои URL → управление источниками.\n"
                 "🚀 Старт охотника → максимально быстрый классический режим.\n"
-                "🛒 Обычный автобай включается по конкретному URL.\n\n"
+                "🛒 Обычный автобай включается по конкретному URL.\n"
+                "📱 Кнопки приложения отправляют готовые файлы для Android и Windows.\n\n"
                 f"✏️ Названия URL автоматически очищаются и ограничены {MAX_URL_NAME_LEN} символами.\n"
                 f"🧾 Лог автобая: {AUTOBUY_LOG_FILE}",
                 reply_markup=kb_main(user_id),
@@ -2405,6 +2609,14 @@ async def buttons_handler(message: types.Message):
             await db_clear_seen(user_id)
             await db_clear_buy_attempted(user_id)
             await send_screen(chat_id, user_id, "♻️ История сброшена. Следующий запуск охотника обработает все лоты как новые (включая автобай по URL, где он активен).", reply_markup=kb_main(user_id))
+            return await safe_delete(message)
+
+        if text == "📱 Приложение Android":
+            await send_app_file(chat_id, "android")
+            return await safe_delete(message)
+
+        if text == "🖥 Приложение Windows":
+            await send_app_file(chat_id, "windows")
             return await safe_delete(message)
 
         if text == "🚀 Старт охотника":
