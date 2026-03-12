@@ -158,16 +158,16 @@ APP_TEMPLATE_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #070b16;
-      --bg-soft: #0e1730;
-      --card: rgba(17, 27, 50, 0.82);
-      --line: #2b3f6f;
+      --bg: #170408;
+      --bg-soft: #2b0d16;
+      --card: rgba(46, 13, 23, 0.86);
+      --line: #7a2f46;
       --text: #f4f8ff;
       --muted: #9db2d7;
-      --accent: #5ea2ff;
-      --accent-2: #7b63ff;
+      --accent: #ff5a7d;
+      --accent-2: #ff2f5e;
       --ok: #4ce4a3;
-      --danger: #ff6482;
+      --danger: #ff6b88;
       --warning: #ffd56a;
       --radius: 16px;
       --shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
@@ -181,8 +181,8 @@ APP_TEMPLATE_HTML = """<!doctype html>
       color: var(--text);
       min-height: 100vh;
       background:
-        radial-gradient(circle at 10% 5%, rgba(124, 80, 255, 0.26), transparent 36%),
-        radial-gradient(circle at 90% 0%, rgba(58, 149, 255, 0.24), transparent 34%),
+        radial-gradient(circle at 10% 5%, rgba(255, 92, 129, 0.28), transparent 36%),
+        radial-gradient(circle at 90% 0%, rgba(255, 44, 88, 0.24), transparent 34%),
         linear-gradient(160deg, var(--bg), #04060d 60%);
       padding: 14px;
     }
@@ -193,7 +193,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 24px;
       padding: 22px;
-      background: linear-gradient(135deg, rgba(26, 40, 74, 0.94), rgba(12, 18, 35, 0.95));
+      background: linear-gradient(135deg, rgba(80, 18, 38, 0.95), rgba(24, 8, 15, 0.96));
       box-shadow: var(--shadow);
       margin-bottom: 12px;
     }
@@ -206,7 +206,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 6px 11px;
-      background: #121d39;
+      background: #31111d;
       color: var(--muted);
       font-size: 12px;
     }
@@ -216,7 +216,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
       border-radius: 12px;
       border: 1px solid var(--line);
       padding: 10px 14px;
-      background: #121a31;
+      background: #34111f;
       color: var(--text);
       cursor: pointer;
       font-weight: 600;
@@ -251,7 +251,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
     button, input, textarea, select {
       border-radius: 11px;
       border: 1px solid var(--line);
-      background: #0e1730;
+      background: #2c0f1c;
       color: var(--text);
       padding: 10px 12px;
       font-size: 14px;
@@ -267,14 +267,15 @@ APP_TEMPLATE_HTML = """<!doctype html>
     }
 
     button:hover { transform: translateY(-1px); border-color: var(--accent); }
-    .btn-accent { border: 0; background: linear-gradient(110deg, #2f81ff, #7667ff); }
+    .btn-accent { border: 0; background: linear-gradient(110deg, #ff5f84, #ff2f60); }
     .btn-ok { border: 0; background: linear-gradient(110deg, #1e9f71, #44d39d); }
-    .btn-danger { border: 1px solid #693348; background: #27121d; color: #ffabc1; }
+    .btn-danger { border: 1px solid #8f324f; background: #2f101a; color: #ffabc1; }
+    .btn-soft { border: 1px solid #8b3854; background: #421524; color: #ffd3de; }
 
     .status {
       border-radius: 12px;
       border: 1px solid var(--line);
-      background: #101933;
+      background: #3a1321;
       padding: 11px;
       color: var(--muted);
       margin-bottom: 8px;
@@ -283,8 +284,8 @@ APP_TEMPLATE_HTML = """<!doctype html>
       align-items: center;
     }
 
-    .status.ok { color: var(--ok); border-color: #2f7f64; background: #0f241f; }
-    .status.warn { color: var(--warning); border-color: #846b2f; background: #29230f; }
+    .status.ok { color: var(--ok); border-color: #4f8f72; background: #132920; }
+    .status.warn { color: var(--warning); border-color: #8d6540; background: #2b1a10; }
     .status.err { color: var(--danger); border-color: #78324b; background: #2a101a; }
 
     .muted { color: var(--muted); font-size: 13px; line-height: 1.4; }
@@ -300,7 +301,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 10px;
-      background: #0d162d;
+      background: #2d0f1b;
     }
 
     .metric b { display: block; font-size: 21px; margin-bottom: 2px; }
@@ -309,14 +310,29 @@ APP_TEMPLATE_HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 10px;
-      background: #0f1932;
+      background: #30111f;
     }
 
     .source-item + .source-item, .lot + .lot, .log-line + .log-line { margin-top: 8px; }
     .source-title { font-weight: 700; margin-bottom: 6px; }
 
-    .lot a { color: #8ac1ff; text-decoration: none; }
+    .lot a { color: #ff9cb3; text-decoration: none; }
     .lot a:hover { text-decoration: underline; }
+
+    details.guide {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #2a0f19;
+    }
+    details.guide summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: #ffd8e2;
+      list-style: none;
+    }
+    details.guide summary::-webkit-details-marker { display: none; }
+    details.guide .muted { margin-top: 8px; }
 
     .pill {
       border: 1px solid var(--line);
@@ -349,10 +365,11 @@ APP_TEMPLATE_HTML = """<!doctype html>
   <main class="app">
     <section class="hero">
       <h1>⚡ Parsing Hunter</h1>
-      <p>Полноценное локальное приложение: управление источниками, автоскан, журнал событий, история новых лотов, экспорт и импорт данных. Файл можно открыть на Android, Windows, macOS, Linux — всё хранится локально в браузере.</p>
+      <p>Полноценное локальное приложение: управление источниками, автоскан, автобай, журнал событий, история новых лотов, экспорт и импорт данных. Файл можно открыть на Android, Windows, macOS, Linux — всё хранится локально в браузере.</p>
       <div class="chips">
         <span class="chip">Offline-first</span>
         <span class="chip">Автоскан + ручная проверка</span>
+        <span class="chip">Гибкий автобай</span>
         <span class="chip">Уведомления в браузере</span>
         <span class="chip">Импорт / экспорт JSON</span>
       </div>
@@ -380,6 +397,15 @@ APP_TEMPLATE_HTML = """<!doctype html>
             <div class="metric"><span class="muted">Всего проверок</span><b id="mScans">0</b></div>
             <div class="metric"><span class="muted">Ошибок API</span><b id="mErrors">0</b></div>
             <div class="metric"><span class="muted">Источников</span><b id="mSources">0</b></div>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Полезные ссылки</h3>
+          <div class="muted">Ссылки отображаются сразу при запуске приложения.</div>
+          <div class="row" style="margin-top:8px">
+            <a class="pill" href="https://t.me/+wHlSL7Ij2rpjYmFi" target="_blank" rel="noopener noreferrer">🛟 Канал поддержки</a>
+            <a class="pill" href="https://t.me/StaliNusshhAaaaaa" target="_blank" rel="noopener noreferrer">👨‍💻 Создатель</a>
           </div>
         </article>
 
@@ -430,17 +456,30 @@ APP_TEMPLATE_HTML = """<!doctype html>
     <section id="settings" class="panel">
       <div class="grid">
         <article class="card">
-          <h3>Параметры сканирования</h3>
+          <h3>Параметры сканирования и автобая</h3>
           <label class="muted">Интервал автоскана (сек)</label>
-          <input type="number" min="3" max="600" id="scanInterval" />
+          <input type="number" min="1" max="600" id="scanInterval" />
           <div style="height:8px"></div>
           <label class="muted">Макс. лотов с источника за цикл</label>
           <input type="number" min="1" max="1000" id="maxItems" />
           <div style="height:8px"></div>
           <label class="muted">Таймаут запроса (мс)</label>
-          <input type="number" min="300" max="30000" id="timeoutMs" />
+          <input type="number" min="150" max="30000" id="timeoutMs" />
+          <div style="height:8px"></div>
+          <label class="muted">Скорость автобая (мс между попытками)</label>
+          <input type="number" min="0" max="10000" id="autobuyDelayMs" />
+          <div style="height:8px"></div>
+          <label class="muted">Макс. покупок за цикл</label>
+          <input type="number" min="1" max="100" id="maxAutobuyPerCycle" />
+          <div style="height:8px"></div>
+          <label class="muted">Минимальная цена для автобая</label>
+          <input type="number" min="0" max="99999999" id="autobuyMinPrice" />
+          <div style="height:8px"></div>
+          <label class="muted">Максимальная цена для автобая</label>
+          <input type="number" min="0" max="99999999" id="autobuyMaxPrice" />
           <div class="row" style="margin-top:8px">
             <button class="btn-ok" onclick="saveSettings()">💾 Сохранить</button>
+            <button class="btn-soft" onclick="applyMinPreset()">🧊 Минимальные значения</button>
           </div>
         </article>
 
@@ -458,6 +497,14 @@ APP_TEMPLATE_HTML = """<!doctype html>
           </div>
           <p class="muted">Импорт заменяет все текущие данные. Экспорт сохраняет источники, историю и настройки.</p>
         </article>
+
+        <article class="card">
+          <h3>Справка по настройкам</h3>
+          <details class="guide">
+            <summary>📖 Открыть / свернуть описание параметров</summary>
+            <div class="muted">• Интервал автоскана — как часто выполняется сканирование.<br/>• Макс. лотов с источника — ограничение объёма данных за один проход.<br/>• Таймаут запроса — сколько ждать ответ API.<br/>• Скорость автобая — пауза между покупками (0 = максимально быстро).<br/>• Макс. покупок за цикл — ограничение числа покупок за один скан.<br/>• Мин/макс цена — фильтр, что именно покупать автоматически.<br/>• Вкладка «Источники» позволяет включать/выключать автобай для каждого URL.</div>
+          </details>
+        </article>
       </div>
     </section>
 
@@ -472,7 +519,16 @@ const DEFAULTS = {
   lots: [],
   logs: [],
   metrics: { newCount: 0, scans: 0, errors: 0 },
-  settings: { intervalSec: 8, maxItemsPerSource: 120, timeoutMs: 3500, notifications: false }
+  settings: {
+    intervalSec: 1,
+    maxItemsPerSource: 1,
+    timeoutMs: 150,
+    autobuyDelayMs: 0,
+    maxAutobuyPerCycle: 1,
+    autobuyMinPrice: 0,
+    autobuyMaxPrice: 0,
+    notifications: false
+  }
 };
 
 const state = loadState();
@@ -529,7 +585,7 @@ function addSource(){
   if(!/^https?:\/\//i.test(url)) return toast('Некорректный URL', 'err');
   if(state.sources.some(s => s.url === url)) return toast('Этот источник уже добавлен', 'warn');
 
-  state.sources.push({ id: cryptoRandomId(), name, url, enabled: true, addedAt: Date.now() });
+  state.sources.push({ id: cryptoRandomId(), name, url, enabled: true, autobuy: false, addedAt: Date.now() });
   nameEl.value = '';
   urlEl.value = '';
   state.metrics.scans = state.metrics.scans || 0;
@@ -560,6 +616,15 @@ function toggleSource(id){
   log(`${src.enabled ? 'Включён' : 'Отключён'} источник: ${src.name}`);
 }
 
+function toggleAutobuySource(id){
+  const src = state.sources.find(s => s.id === id);
+  if(!src) return;
+  src.autobuy = !src.autobuy;
+  saveState();
+  renderSources();
+  log(`Автобай ${src.autobuy ? 'включён' : 'выключен'}: ${src.name}`);
+}
+
 function renderSources(){
   const box = document.getElementById('sourceList');
   if(!state.sources.length){
@@ -569,10 +634,11 @@ function renderSources(){
 
   box.innerHTML = state.sources.map(s => `
     <div class="source-item">
-      <div class="source-title">${escapeHtml(s.name)} ${s.enabled ? '' : '<span class="pill">OFF</span>'}</div>
+      <div class="source-title">${escapeHtml(s.name)} ${s.enabled ? '' : '<span class="pill">OFF</span>'} ${s.autobuy ? '<span class="pill">🛒 AUTOBUY</span>' : ''}</div>
       <div class="muted">${escapeHtml(s.url)}</div>
       <div class="row" style="margin-top:8px">
         <button onclick="toggleSource('${s.id}')">${s.enabled ? '⏸ Выключить' : '▶️ Включить'}</button>
+        <button class="btn-soft" onclick="toggleAutobuySource('${s.id}')">${s.autobuy ? '🛒 Автобай: ВКЛ' : '🛍 Автобай: ВЫКЛ'}</button>
         <button class="btn-danger" onclick="removeSource('${s.id}')">🗑 Удалить</button>
       </div>
     </div>`).join('');
@@ -664,12 +730,33 @@ async function runScanNow(){
 
   setStatus('Сканирование...', 'info');
   let newFound = 0;
+  let boughtCount = 0;
 
   for(const s of activeSources){
     try {
       const added = await scanSource(s);
       newFound += added;
       if(added) log(`${s.name}: найдено ${added} новых`, 'ok');
+
+      if(s.autobuy){
+        const limit = Number(state.settings.maxAutobuyPerCycle) || 1;
+        const delay = Math.max(0, Number(state.settings.autobuyDelayMs) || 0);
+        const minPrice = Math.max(0, Number(state.settings.autobuyMinPrice) || 0);
+        const maxPrice = Math.max(0, Number(state.settings.autobuyMaxPrice) || 0);
+        const sourceLots = state.lots.filter(l => l.sourceUrl === s.url).slice(0, 200);
+        for(const lot of sourceLots){
+          if(boughtCount >= limit) break;
+          const price = Number(lot.price ?? lot.priceText);
+          if(Number.isFinite(price)){
+            if(price < minPrice) continue;
+            if(maxPrice > 0 && price > maxPrice) continue;
+          }
+          lot.autoBuyAt = Date.now();
+          boughtCount += 1;
+          log(`🛒 Автобай: ${s.name} → ${lot.title}`, 'ok');
+          if(delay > 0) await new Promise(r => setTimeout(r, delay));
+        }
+      }
     } catch(err){
       state.metrics.errors += 1;
       log(`${s.name}: ошибка ${String(err.message || err)}`, 'err');
@@ -685,9 +772,9 @@ async function runScanNow(){
   renderLots();
   renderLogs();
 
-  if(newFound > 0){
-    setStatus(`Готово: найдено ${newFound} новых лотов.`, 'ok');
-    maybeNotify(`Parsing Hunter: +${newFound} новых лотов`);
+  if(newFound > 0 || boughtCount > 0){
+    setStatus(`Готово: новых ${newFound}, автобай ${boughtCount}.`, 'ok');
+    maybeNotify(`Parsing Hunter: +${newFound} новых, автобай ${boughtCount}`);
   } else {
     setStatus('Новых лотов не найдено.', 'warn');
   }
@@ -703,7 +790,7 @@ function toggleHunter(){
     return;
   }
 
-  const interval = Math.max(3, Number(state.settings.intervalSec) || 8) * 1000;
+  const interval = Math.max(1, Number(state.settings.intervalSec) || 1) * 1000;
   hunterTimer = setInterval(runScanNow, interval);
   document.getElementById('hunterBtn').textContent = '🛑 Остановить охотника';
   setStatus('Охотник запущен.', 'ok');
@@ -764,9 +851,13 @@ async function testSourceUrl(){
 }
 
 function saveSettings(){
-  state.settings.intervalSec = clamp(Number(document.getElementById('scanInterval').value) || 8, 3, 600);
-  state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 120, 1, 1000);
-  state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 3500, 300, 30000);
+  state.settings.intervalSec = clamp(Number(document.getElementById('scanInterval').value) || 1, 1, 600);
+  state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 1, 1, 1000);
+  state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 150, 150, 30000);
+  state.settings.autobuyDelayMs = clamp(Number(document.getElementById('autobuyDelayMs').value) || 0, 0, 10000);
+  state.settings.maxAutobuyPerCycle = clamp(Number(document.getElementById('maxAutobuyPerCycle').value) || 1, 1, 100);
+  state.settings.autobuyMinPrice = clamp(Number(document.getElementById('autobuyMinPrice').value) || 0, 0, 99999999);
+  state.settings.autobuyMaxPrice = clamp(Number(document.getElementById('autobuyMaxPrice').value) || 0, 0, 99999999);
   saveState();
   toast('Настройки сохранены', 'ok');
   if(hunterTimer){
@@ -775,6 +866,18 @@ function saveSettings(){
     document.getElementById('hunterBtn').textContent = '🚀 Запустить охотника';
     toggleHunter();
   }
+}
+
+
+function applyMinPreset(){
+  document.getElementById('scanInterval').value = 1;
+  document.getElementById('maxItems').value = 1;
+  document.getElementById('timeoutMs').value = 150;
+  document.getElementById('autobuyDelayMs').value = 0;
+  document.getElementById('maxAutobuyPerCycle').value = 1;
+  document.getElementById('autobuyMinPrice').value = 0;
+  document.getElementById('autobuyMaxPrice').value = 0;
+  saveSettings();
 }
 
 function exportBackup(){
@@ -844,6 +947,10 @@ function init(){
   document.getElementById('scanInterval').value = state.settings.intervalSec;
   document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
   document.getElementById('timeoutMs').value = state.settings.timeoutMs;
+  document.getElementById('autobuyDelayMs').value = state.settings.autobuyDelayMs ?? 0;
+  document.getElementById('maxAutobuyPerCycle').value = state.settings.maxAutobuyPerCycle ?? 1;
+  document.getElementById('autobuyMinPrice').value = state.settings.autobuyMinPrice ?? 0;
+  document.getElementById('autobuyMaxPrice').value = state.settings.autobuyMaxPrice ?? 0;
   document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
 
   renderSources();
