@@ -35,9 +35,9 @@ OWNER_ID = 1377985336
 OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
-HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.01").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "2.20").strip())
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.25").strip())
+HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.005").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "1.80").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.18").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "2").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.08").strip())
 
@@ -47,11 +47,11 @@ ERROR_REPORT_INTERVAL = 3600
 MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
-MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "80").strip())
+MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "160").strip())
 LIMITED_EXTRA_DELAY = 3.0
-MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "80").strip())
-SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.01").strip())
-OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.001").strip())
+MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "120").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.005").strip())
+OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -63,13 +63,15 @@ USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.0").strip())
 AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "3").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.005").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.02").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
-AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "1").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "5").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "4.80").strip())
-MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "35").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.003").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.012").strip())
+AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.03").strip())
+AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.08").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.12").strip())
+AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "3").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "8").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "2.20").strip())
+MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "60").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -441,7 +443,7 @@ user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
 autobuy_endpoint_cache: dict[str, list[str]] = {}
 buy_locks: dict[str, asyncio.Lock] = {}
-buy_semaphore = asyncio.Semaphore(int((os.getenv("BUY_SEMAPHORE") or "64").strip()))
+buy_semaphore = asyncio.Semaphore(int((os.getenv("BUY_SEMAPHORE") or "128").strip()))
 
 
 def get_buy_lock(item_key: str) -> asyncio.Lock:
@@ -1240,6 +1242,9 @@ async def fetch_all_sources(user_id: int):
     if not sources:
         return [], []
 
+    # Для минимальной задержки автобая сначала запускаем опрос URL с включённым автобаем.
+    sources.sort(key=lambda s: (not bool(s.get("autobuy", False)), s.get("idx", 0)))
+
     tasks = [asyncio.create_task(_fetch_source_items(s)) for s in sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1263,6 +1268,9 @@ async def iter_sources_results(user_id: int):
     sources = await get_all_sources(user_id, enabled_only=True)
     if not sources:
         return
+
+    # Для минимальной задержки автобая сначала запускаем опрос URL с включённым автобаем.
+    sources.sort(key=lambda s: (not bool(s.get("autobuy", False)), s.get("idx", 0)))
 
     tasks = [asyncio.create_task(_fetch_source_items(s)) for s in sources]
     try:
@@ -1564,7 +1572,7 @@ def _sanitize_buy_info_for_user(info: str) -> str:
 def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
     if state in {"auth", "secret", "terminal", "success"}:
         return True
-    if status in (400, 401, 403, 404, 405):
+    if status in (400, 401, 403):
         return True
     low = (info or "").lower()
     if any(x in low for x in (
@@ -1809,7 +1817,7 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
 
             if attempt < attempts:
                 if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
-                    delay = random.uniform(0.20, 0.60)
+                    delay = random.uniform(AUTOBUY_QUEUE_RETRY_MIN_DELAY, AUTOBUY_QUEUE_RETRY_MAX_DELAY)
                 else:
                     delay = random.uniform(min_delay, max_delay)
                 log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} attempt={attempt} sleep={delay:.3f}s")
