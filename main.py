@@ -153,156 +153,707 @@ APP_TEMPLATE_HTML = """<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Parsing Hunter App</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #090b14;
-      --card: #131a2d;
-      --line: #263557;
-      --text: #f2f7ff;
-      --muted: #9eb3d4;
-      --accent: #6db3ff;
-      --ok: #54e1a2;
+      --bg: #070b16;
+      --bg-soft: #0e1730;
+      --card: rgba(17, 27, 50, 0.82);
+      --line: #2b3f6f;
+      --text: #f4f8ff;
+      --muted: #9db2d7;
+      --accent: #5ea2ff;
+      --accent-2: #7b63ff;
+      --ok: #4ce4a3;
+      --danger: #ff6482;
+      --warning: #ffd56a;
+      --radius: 16px;
+      --shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      font-family: Inter, Segoe UI, Arial, sans-serif;
-      background: radial-gradient(circle at top, #15254d, var(--bg) 40%);
+      font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
       color: var(--text);
       min-height: 100vh;
-      padding: 18px;
+      background:
+        radial-gradient(circle at 10% 5%, rgba(124, 80, 255, 0.26), transparent 36%),
+        radial-gradient(circle at 90% 0%, rgba(58, 149, 255, 0.24), transparent 34%),
+        linear-gradient(160deg, var(--bg), #04060d 60%);
+      padding: 14px;
     }
-    .wrap { max-width: 980px; margin: 0 auto; }
-    .hero, .card { background: rgba(19,26,45,.88); border: 1px solid var(--line); border-radius: 18px; backdrop-filter: blur(8px); }
-    .hero { padding: 20px; margin-bottom: 16px; }
-    .hero h1 { margin: 0 0 8px; font-size: 24px; }
-    .hero p { margin: 0; color: var(--muted); }
-    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-    .card { padding: 14px; }
-    .card h3 { margin: 0 0 8px; font-size: 15px; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
-    input, button {
-      border-radius: 10px;
+
+    .app { max-width: 1080px; margin: 0 auto; }
+
+    .hero {
       border: 1px solid var(--line);
-      background: #0f1527;
-      color: var(--text);
-      padding: 10px;
+      border-radius: 24px;
+      padding: 22px;
+      background: linear-gradient(135deg, rgba(26, 40, 74, 0.94), rgba(12, 18, 35, 0.95));
+      box-shadow: var(--shadow);
+      margin-bottom: 12px;
     }
-    input { width: 100%; }
-    button { cursor: pointer; transition: .2s ease; }
-    button:hover { border-color: var(--accent); transform: translateY(-1px); }
-    .accent { background: linear-gradient(90deg, #2f7fff, #5f8bff); border: 0; }
-    .ok { color: var(--ok); }
-    .muted { color: var(--muted); font-size: 13px; }
-    #lots { max-height: 55vh; overflow: auto; display: grid; gap: 8px; }
-    .lot { border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: #10192b; }
-    .lot a { color: var(--accent); text-decoration: none; }
-    .badge { background: #182749; padding: 3px 8px; border-radius: 999px; font-size: 12px; }
+
+    .hero h1 { margin: 0; font-size: clamp(24px, 4vw, 32px); }
+    .hero p { margin: 8px 0 0; color: var(--muted); max-width: 760px; line-height: 1.45; }
+
+    .chips { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 11px;
+      background: #121d39;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    .tab {
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 10px 14px;
+      background: #121a31;
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .tab.active {
+      border-color: transparent;
+      background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 10px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      backdrop-filter: blur(8px);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .card h3 { margin: 0 0 10px; font-size: 16px; }
+
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    button, input, textarea, select {
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      background: #0e1730;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+
+    input, textarea, select { width: 100%; }
+    textarea { min-height: 90px; resize: vertical; }
+
+    button {
+      cursor: pointer;
+      transition: .18s ease;
+      font-weight: 600;
+    }
+
+    button:hover { transform: translateY(-1px); border-color: var(--accent); }
+    .btn-accent { border: 0; background: linear-gradient(110deg, #2f81ff, #7667ff); }
+    .btn-ok { border: 0; background: linear-gradient(110deg, #1e9f71, #44d39d); }
+    .btn-danger { border: 1px solid #693348; background: #27121d; color: #ffabc1; }
+
+    .status {
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #101933;
+      padding: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+    }
+
+    .status.ok { color: var(--ok); border-color: #2f7f64; background: #0f241f; }
+    .status.warn { color: var(--warning); border-color: #846b2f; background: #29230f; }
+    .status.err { color: var(--danger); border-color: #78324b; background: #2a101a; }
+
+    .muted { color: var(--muted); font-size: 13px; line-height: 1.4; }
+
+    .metrics {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #0d162d;
+    }
+
+    .metric b { display: block; font-size: 21px; margin-bottom: 2px; }
+
+    .source-item, .log-line, .lot {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #0f1932;
+    }
+
+    .source-item + .source-item, .lot + .lot, .log-line + .log-line { margin-top: 8px; }
+    .source-title { font-weight: 700; margin-bottom: 6px; }
+
+    .lot a { color: #8ac1ff; text-decoration: none; }
+    .lot a:hover { text-decoration: underline; }
+
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-right: 6px;
+      margin-top: 4px;
+    }
+
+    .list {
+      max-height: 55vh;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .footer-note { margin-top: 12px; color: var(--muted); font-size: 12px; text-align: center; }
+
+    @media (max-width: 700px) {
+      body { padding: 10px; }
+      .hero { border-radius: 16px; padding: 16px; }
+      .tab { flex: 1; text-align: center; }
+    }
   </style>
 </head>
 <body>
-  <main class="wrap">
+  <main class="app">
     <section class="hero">
-      <h1>⚡ Parsing Hunter App</h1>
-      <p>Локальное приложение для Android/Windows. Работает как бот: мониторит URL, показывает новые лоты и ведёт историю.</p>
+      <h1>⚡ Parsing Hunter</h1>
+      <p>Полноценное локальное приложение: управление источниками, автоскан, журнал событий, история новых лотов, экспорт и импорт данных. Файл можно открыть на Android, Windows, macOS, Linux — всё хранится локально в браузере.</p>
+      <div class="chips">
+        <span class="chip">Offline-first</span>
+        <span class="chip">Автоскан + ручная проверка</span>
+        <span class="chip">Уведомления в браузере</span>
+        <span class="chip">Импорт / экспорт JSON</span>
+      </div>
     </section>
-    <section class="grid">
-      <article class="card">
-        <h3>1) API URL источников</h3>
-        <input id="urlInput" placeholder="Вставь API URL и нажми Добавить" />
-        <div class="row">
-          <button class="accent" onclick="addUrl()">➕ Добавить</button>
-          <button onclick="toggleRun()">🚀 Старт/Стоп</button>
-          <button onclick="resetSeen()">♻️ Сбросить историю</button>
-        </div>
-        <div id="sources" class="muted"></div>
-      </article>
-      <article class="card">
-        <h3>2) Статус</h3>
-        <div id="status" class="muted">Остановлено</div>
-        <div class="row">
-          <span class="badge">Цикл: 5 сек</span>
-          <span class="badge">Новые лоты: <span id="newCount">0</span></span>
-        </div>
-      </article>
-    </section>
-    <section class="card" style="margin-top: 12px;">
-      <h3>🧾 Новые лоты</h3>
-      <div id="lots"></div>
-    </section>
-  </main>
-<script>
-  const STORE_KEY = 'parsing_hunter_store_v1';
-  const state = JSON.parse(localStorage.getItem(STORE_KEY) || '{"urls":[],"seen":{}}');
-  let timer = null;
-  let newCount = 0;
 
-  function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(state)); renderSources(); }
-  function renderSources(){
-    const box = document.getElementById('sources');
-    if(!state.urls.length){ box.textContent = 'Источники не добавлены'; return; }
-    box.innerHTML = state.urls.map((u, i) => `${i + 1}. ${u}`).join('<br>');
+    <div class="tabs">
+      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">🏠 Дашборд</button>
+      <button class="tab" data-tab="sources" onclick="switchTab('sources')">🔗 Источники</button>
+      <button class="tab" data-tab="lots" onclick="switchTab('lots')">🧾 Лоты</button>
+      <button class="tab" data-tab="settings" onclick="switchTab('settings')">⚙️ Настройки</button>
+    </div>
+
+    <section id="dashboard" class="panel active">
+      <div class="grid">
+        <article class="card">
+          <h3>Сканирование</h3>
+          <div id="statusBox" class="status">Остановлено</div>
+          <div class="row">
+            <button class="btn-accent" onclick="runScanNow()">✨ Проверить сейчас</button>
+            <button class="btn-ok" onclick="toggleHunter()" id="hunterBtn">🚀 Запустить охотника</button>
+            <button class="btn-danger" onclick="clearSeen()">♻️ Сброс истории</button>
+          </div>
+          <div class="metrics">
+            <div class="metric"><span class="muted">Новых за сессию</span><b id="mNew">0</b></div>
+            <div class="metric"><span class="muted">Всего проверок</span><b id="mScans">0</b></div>
+            <div class="metric"><span class="muted">Ошибок API</span><b id="mErrors">0</b></div>
+            <div class="metric"><span class="muted">Источников</span><b id="mSources">0</b></div>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Журнал событий</h3>
+          <div id="logList" class="list muted"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="sources" class="panel">
+      <div class="grid">
+        <article class="card">
+          <h3>Добавить источник</h3>
+          <input id="sourceName" placeholder="Название (например: EpicNPC PUBG)" />
+          <div style="height:8px"></div>
+          <textarea id="sourceUrl" placeholder="API URL (https://...)" spellcheck="false"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn-accent" onclick="addSource()">➕ Добавить</button>
+            <button onclick="testSourceUrl()">✅ Тест URL</button>
+          </div>
+          <div class="muted" id="sourceTestMsg" style="margin-top:8px"></div>
+        </article>
+
+        <article class="card">
+          <h3>Список источников</h3>
+          <div id="sourceList" class="list muted"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="lots" class="panel">
+      <article class="card">
+        <h3>Новые лоты</h3>
+        <div class="row" style="margin-bottom:8px">
+          <input id="lotFilter" placeholder="Фильтр по названию / цене / источнику" oninput="renderLots()" />
+          <select id="lotSort" onchange="renderLots()" style="max-width:220px">
+            <option value="new">Сначала новые</option>
+            <option value="old">Сначала старые</option>
+            <option value="priceHigh">Цена: по убыванию</option>
+            <option value="priceLow">Цена: по возрастанию</option>
+          </select>
+        </div>
+        <div id="lotList" class="list muted"></div>
+      </article>
+    </section>
+
+    <section id="settings" class="panel">
+      <div class="grid">
+        <article class="card">
+          <h3>Параметры сканирования</h3>
+          <label class="muted">Интервал автоскана (сек)</label>
+          <input type="number" min="3" max="600" id="scanInterval" />
+          <div style="height:8px"></div>
+          <label class="muted">Макс. лотов с источника за цикл</label>
+          <input type="number" min="1" max="1000" id="maxItems" />
+          <div style="height:8px"></div>
+          <label class="muted">Таймаут запроса (мс)</label>
+          <input type="number" min="300" max="30000" id="timeoutMs" />
+          <div class="row" style="margin-top:8px">
+            <button class="btn-ok" onclick="saveSettings()">💾 Сохранить</button>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Резервная копия</h3>
+          <div class="row">
+            <button onclick="exportBackup()">📤 Экспорт JSON</button>
+            <button onclick="document.getElementById('backupFile').click()">📥 Импорт JSON</button>
+            <input type="file" id="backupFile" accept="application/json" style="display:none" onchange="importBackup(event)" />
+          </div>
+          <div style="height:8px"></div>
+          <div class="row">
+            <button onclick="toggleNotifications()" id="notifyBtn">🔔 Включить уведомления</button>
+            <button class="btn-danger" onclick="factoryReset()">🧨 Сбросить всё</button>
+          </div>
+          <p class="muted">Импорт заменяет все текущие данные. Экспорт сохраняет источники, историю и настройки.</p>
+        </article>
+      </div>
+    </section>
+
+    <p class="footer-note">Parsing Hunter App • локальный HTML-файл без серверной части</p>
+  </main>
+
+<script>
+const STORE_KEY = 'parsing_hunter_store_v2';
+const DEFAULTS = {
+  sources: [],
+  seen: {},
+  lots: [],
+  logs: [],
+  metrics: { newCount: 0, scans: 0, errors: 0 },
+  settings: { intervalSec: 8, maxItemsPerSource: 120, timeoutMs: 3500, notifications: false }
+};
+
+const state = loadState();
+let hunterTimer = null;
+
+function deepClone(v){ return JSON.parse(JSON.stringify(v)); }
+function loadState(){
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+    return {
+      ...deepClone(DEFAULTS),
+      ...raw,
+      metrics: { ...DEFAULTS.metrics, ...(raw.metrics || {}) },
+      settings: { ...DEFAULTS.settings, ...(raw.settings || {}) },
+      sources: Array.isArray(raw.sources) ? raw.sources : [],
+      lots: Array.isArray(raw.lots) ? raw.lots : [],
+      logs: Array.isArray(raw.logs) ? raw.logs : [],
+      seen: raw.seen && typeof raw.seen === 'object' ? raw.seen : {}
+    };
+  } catch {
+    return deepClone(DEFAULTS);
   }
-  function addUrl(){
-    const el = document.getElementById('urlInput');
-    const url = el.value.trim();
-    if(!url || !/^https?:\/\//i.test(url)) return alert('Некорректный URL');
-    if(state.urls.includes(url)) return;
-    state.urls.push(url); el.value = ''; save();
-  }
-  function resetSeen(){ state.seen = {}; save(); setStatus('История очищена', true); }
-  function setStatus(t, ok=false){
-    const s = document.getElementById('status');
-    s.textContent = t;
-    s.className = ok ? 'ok' : 'muted';
-  }
-  function addLotCard(item, source){
-    const lots = document.getElementById('lots');
-    const id = item.item_id || item.id || item.itemId || Math.random().toString(16).slice(2);
-    const title = item.title || item.name || `Лот ${id}`;
-    const price = item.price ?? item.amount ?? '—';
-    const link = item.url || item.link || '#';
-    const div = document.createElement('div');
-    div.className = 'lot';
-    div.innerHTML = `<b>${title}</b><br><span class='muted'>Источник: ${source}</span><br>💰 ${price}<br><a href='${link}' target='_blank'>Открыть</a>`;
-    lots.prepend(div);
-  }
-  async function scanOnce(){
-    if(!state.urls.length){ setStatus('Добавь хотя бы один URL'); return; }
-    setStatus('Сканирование...');
-    let found = 0;
-    for(const url of state.urls){
-      try {
-        const res = await fetch(url, {cache:'no-store'});
-        if(!res.ok) continue;
-        const data = await res.json();
-        const items = data.items || data.data?.items || data.results || [];
-        for(const item of items){
-          const id = String(item.item_id || item.id || item.itemId || '');
-          if(!id) continue;
-          if(!state.seen[url]) state.seen[url] = {};
-          if(state.seen[url][id]) continue;
-          state.seen[url][id] = 1;
-          found += 1;
-          newCount += 1;
-          addLotCard(item, url);
-        }
-      } catch (e) {}
-    }
-    document.getElementById('newCount').textContent = String(newCount);
-    setStatus(found ? `Найдено новых: ${found}` : 'Новых лотов не найдено', true);
-    save();
-  }
-  function toggleRun(){
-    if(timer){ clearInterval(timer); timer = null; setStatus('Остановлено'); return; }
-    scanOnce();
-    timer = setInterval(scanOnce, 5000);
-    setStatus('Охотник запущен', true);
-  }
+}
+function saveState(){ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+
+function log(msg, level='info'){
+  const t = new Date().toLocaleTimeString();
+  state.logs.unshift({ t, msg, level });
+  if(state.logs.length > 200) state.logs.length = 200;
+  renderLogs();
+  saveState();
+}
+
+function setStatus(text, kind='info'){
+  const el = document.getElementById('statusBox');
+  el.textContent = text;
+  el.className = 'status' + (kind === 'ok' ? ' ok' : kind === 'warn' ? ' warn' : kind === 'err' ? ' err' : '');
+}
+
+function switchTab(tab){
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === tab));
+}
+
+function cleanUrl(url){ return String(url || '').trim(); }
+function sourceKey(src){ return src.url; }
+
+function addSource(){
+  const nameEl = document.getElementById('sourceName');
+  const urlEl = document.getElementById('sourceUrl');
+  const name = (nameEl.value || '').trim() || 'Без названия';
+  const url = cleanUrl(urlEl.value);
+
+  if(!/^https?:\/\//i.test(url)) return toast('Некорректный URL', 'err');
+  if(state.sources.some(s => s.url === url)) return toast('Этот источник уже добавлен', 'warn');
+
+  state.sources.push({ id: cryptoRandomId(), name, url, enabled: true, addedAt: Date.now() });
+  nameEl.value = '';
+  urlEl.value = '';
+  state.metrics.scans = state.metrics.scans || 0;
+  saveState();
   renderSources();
+  updateMetrics();
+  log(`Добавлен источник: ${name}`);
+  toast('Источник добавлен', 'ok');
+}
+
+function removeSource(id){
+  const idx = state.sources.findIndex(s => s.id === id);
+  if(idx < 0) return;
+  const removed = state.sources.splice(idx, 1)[0];
+  delete state.seen[removed.url];
+  saveState();
+  renderSources();
+  updateMetrics();
+  log(`Удалён источник: ${removed.name}`, 'warn');
+}
+
+function toggleSource(id){
+  const src = state.sources.find(s => s.id === id);
+  if(!src) return;
+  src.enabled = !src.enabled;
+  saveState();
+  renderSources();
+  log(`${src.enabled ? 'Включён' : 'Отключён'} источник: ${src.name}`);
+}
+
+function renderSources(){
+  const box = document.getElementById('sourceList');
+  if(!state.sources.length){
+    box.innerHTML = '<div class="muted">Источники не добавлены.</div>';
+    return;
+  }
+
+  box.innerHTML = state.sources.map(s => `
+    <div class="source-item">
+      <div class="source-title">${escapeHtml(s.name)} ${s.enabled ? '' : '<span class="pill">OFF</span>'}</div>
+      <div class="muted">${escapeHtml(s.url)}</div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="toggleSource('${s.id}')">${s.enabled ? '⏸ Выключить' : '▶️ Включить'}</button>
+        <button class="btn-danger" onclick="removeSource('${s.id}')">🗑 Удалить</button>
+      </div>
+    </div>`).join('');
+}
+
+function updateMetrics(){
+  document.getElementById('mNew').textContent = String(state.metrics.newCount || 0);
+  document.getElementById('mScans').textContent = String(state.metrics.scans || 0);
+  document.getElementById('mErrors').textContent = String(state.metrics.errors || 0);
+  document.getElementById('mSources').textContent = String(state.sources.length);
+}
+
+function renderLogs(){
+  const box = document.getElementById('logList');
+  if(!state.logs.length){ box.innerHTML = '<div class="muted">Журнал пуст.</div>'; return; }
+  box.innerHTML = state.logs.slice(0, 80).map(l => `<div class="log-line">[${l.t}] ${escapeHtml(l.msg)}</div>`).join('');
+}
+
+function normalizeItems(data){
+  if(Array.isArray(data)) return data;
+  if(Array.isArray(data.items)) return data.items;
+  if(data.data && Array.isArray(data.data.items)) return data.data.items;
+  if(Array.isArray(data.results)) return data.results;
+  return [];
+}
+
+function pickId(item){ return String(item.item_id || item.id || item.itemId || item.lot_id || ''); }
+
+function parsePrice(item){
+  const raw = item.price ?? item.amount ?? item.cost ?? item.sum;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function makeLot(item, source){
+  const id = pickId(item) || cryptoRandomId();
+  return {
+    id,
+    sourceName: source.name,
+    sourceUrl: source.url,
+    title: String(item.title || item.name || ('Лот #' + id)).slice(0, 240),
+    price: parsePrice(item),
+    priceText: item.price ?? item.amount ?? item.cost ?? '—',
+    link: String(item.url || item.link || '#'),
+    createdAt: Date.now()
+  };
+}
+
+async function fetchWithTimeout(url, timeoutMs){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function scanSource(source){
+  const data = await fetchWithTimeout(source.url, state.settings.timeoutMs);
+  const items = normalizeItems(data).slice(0, state.settings.maxItemsPerSource);
+
+  if(!state.seen[source.url]) state.seen[source.url] = {};
+  const seenMap = state.seen[source.url];
+  let added = 0;
+
+  for(const item of items){
+    const itemId = pickId(item);
+    if(!itemId) continue;
+    if(seenMap[itemId]) continue;
+    seenMap[itemId] = 1;
+
+    const lot = makeLot(item, source);
+    state.lots.unshift(lot);
+    added += 1;
+  }
+
+  return added;
+}
+
+async function runScanNow(){
+  const activeSources = state.sources.filter(s => s.enabled);
+  if(!activeSources.length){
+    setStatus('Нет активных источников — добавь URL в разделе «Источники».', 'warn');
+    return;
+  }
+
+  setStatus('Сканирование...', 'info');
+  let newFound = 0;
+
+  for(const s of activeSources){
+    try {
+      const added = await scanSource(s);
+      newFound += added;
+      if(added) log(`${s.name}: найдено ${added} новых`, 'ok');
+    } catch(err){
+      state.metrics.errors += 1;
+      log(`${s.name}: ошибка ${String(err.message || err)}`, 'err');
+    }
+  }
+
+  state.metrics.scans += 1;
+  state.metrics.newCount += newFound;
+  if(state.lots.length > 2000) state.lots.length = 2000;
+
+  saveState();
+  updateMetrics();
+  renderLots();
+  renderLogs();
+
+  if(newFound > 0){
+    setStatus(`Готово: найдено ${newFound} новых лотов.`, 'ok');
+    maybeNotify(`Parsing Hunter: +${newFound} новых лотов`);
+  } else {
+    setStatus('Новых лотов не найдено.', 'warn');
+  }
+}
+
+function toggleHunter(){
+  if(hunterTimer){
+    clearInterval(hunterTimer);
+    hunterTimer = null;
+    document.getElementById('hunterBtn').textContent = '🚀 Запустить охотника';
+    setStatus('Охотник остановлен.', 'warn');
+    log('Автоскан остановлен', 'warn');
+    return;
+  }
+
+  const interval = Math.max(3, Number(state.settings.intervalSec) || 8) * 1000;
+  hunterTimer = setInterval(runScanNow, interval);
+  document.getElementById('hunterBtn').textContent = '🛑 Остановить охотника';
+  setStatus('Охотник запущен.', 'ok');
+  log('Автоскан запущен', 'ok');
+  runScanNow();
+}
+
+function renderLots(){
+  const box = document.getElementById('lotList');
+  const filter = (document.getElementById('lotFilter').value || '').trim().toLowerCase();
+  const sortMode = document.getElementById('lotSort').value;
+
+  let arr = [...state.lots];
+  if(filter){
+    arr = arr.filter(l => (`${l.title} ${l.sourceName} ${l.priceText}`).toLowerCase().includes(filter));
+  }
+
+  arr.sort((a, b) => {
+    if(sortMode === 'old') return a.createdAt - b.createdAt;
+    if(sortMode === 'priceHigh') return (b.price ?? -Infinity) - (a.price ?? -Infinity);
+    if(sortMode === 'priceLow') return (a.price ?? Infinity) - (b.price ?? Infinity);
+    return b.createdAt - a.createdAt;
+  });
+
+  if(!arr.length){ box.innerHTML = '<div class="muted">Лотов пока нет.</div>'; return; }
+
+  box.innerHTML = arr.slice(0, 1000).map(l => `
+    <div class="lot">
+      <div class="source-title">${escapeHtml(l.title)}</div>
+      <div class="muted">Источник: ${escapeHtml(l.sourceName)} • ${new Date(l.createdAt).toLocaleString()}</div>
+      <div class="row" style="margin-top:6px">
+        <span class="pill">💰 ${escapeHtml(String(l.priceText ?? '—'))}</span>
+        <span class="pill">ID: ${escapeHtml(l.id)}</span>
+      </div>
+      <div style="margin-top:6px"><a href="${escapeAttr(l.link)}" target="_blank" rel="noopener noreferrer">Открыть лот</a></div>
+    </div>`).join('');
+}
+
+function clearSeen(){
+  state.seen = {};
+  saveState();
+  log('История просмотренных лотов очищена', 'warn');
+  setStatus('История очищена.', 'ok');
+}
+
+async function testSourceUrl(){
+  const msg = document.getElementById('sourceTestMsg');
+  const url = cleanUrl(document.getElementById('sourceUrl').value);
+  if(!/^https?:\/\//i.test(url)){ msg.textContent = 'Введите корректный URL.'; return; }
+  msg.textContent = 'Проверка...';
+  try {
+    const data = await fetchWithTimeout(url, Math.min(4000, state.settings.timeoutMs));
+    const items = normalizeItems(data);
+    msg.textContent = `OK: доступен, найдено элементов: ${items.length}`;
+  } catch(err){
+    msg.textContent = `Ошибка: ${String(err.message || err)}`;
+  }
+}
+
+function saveSettings(){
+  state.settings.intervalSec = clamp(Number(document.getElementById('scanInterval').value) || 8, 3, 600);
+  state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 120, 1, 1000);
+  state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 3500, 300, 30000);
+  saveState();
+  toast('Настройки сохранены', 'ok');
+  if(hunterTimer){
+    clearInterval(hunterTimer);
+    hunterTimer = null;
+    document.getElementById('hunterBtn').textContent = '🚀 Запустить охотника';
+    toggleHunter();
+  }
+}
+
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `parsing-hunter-backup-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Экспорт готов', 'ok');
+}
+
+function importBackup(e){
+  const file = e.target.files?.[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result || '{}'));
+      localStorage.setItem(STORE_KEY, JSON.stringify(parsed));
+      location.reload();
+    } catch {
+      toast('Не удалось импортировать JSON', 'err');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function factoryReset(){
+  if(!confirm('Точно удалить все данные приложения?')) return;
+  localStorage.removeItem(STORE_KEY);
+  location.reload();
+}
+
+async function toggleNotifications(){
+  if(!('Notification' in window)) return toast('Браузер не поддерживает уведомления', 'warn');
+  if(Notification.permission === 'granted'){
+    state.settings.notifications = !state.settings.notifications;
+    saveState();
+    document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
+    return;
+  }
+  const p = await Notification.requestPermission();
+  state.settings.notifications = (p === 'granted');
+  saveState();
+  document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
+}
+
+function maybeNotify(text){
+  if(!state.settings.notifications) return;
+  if(!('Notification' in window)) return;
+  if(Notification.permission !== 'granted') return;
+  try { new Notification(text); } catch {}
+}
+
+function toast(text, kind='info'){
+  setStatus(text, kind);
+  if(kind === 'err') log(text, 'err');
+}
+
+function clamp(n, min, max){ return Math.max(min, Math.min(max, n)); }
+function cryptoRandomId(){ return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+function escapeAttr(s){ return escapeHtml(s).replace(/'/g, '&#39;'); }
+
+function init(){
+  document.getElementById('scanInterval').value = state.settings.intervalSec;
+  document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
+  document.getElementById('timeoutMs').value = state.settings.timeoutMs;
+  document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
+
+  renderSources();
+  renderLots();
+  renderLogs();
+  updateMetrics();
+  setStatus('Приложение готово к работе.', 'ok');
+}
+
+init();
 </script>
 </body>
 </html>
@@ -378,8 +929,7 @@ def ensure_app_bundle(kind: str) -> Path:
         raise ValueError("unknown app kind")
 
     app_path = apps_dir / filename
-    if not app_path.exists():
-        app_path.write_text(APP_TEMPLATE_HTML, encoding="utf-8")
+    app_path.write_text(APP_TEMPLATE_HTML, encoding="utf-8")
     return app_path
 
 
