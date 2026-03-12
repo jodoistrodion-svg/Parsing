@@ -60,6 +60,7 @@ SEED_URLS_JSON = (os.getenv("SEED_URLS_JSON") or "").strip()
 
 URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
+MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.0").strip())
 AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
@@ -226,6 +227,22 @@ def _format_value(v, limit: int = 140) -> str:
     if len(s) > limit:
         return s[: limit - 1] + "…"
     return s
+
+
+def sanitize_url_name(raw_name: str | None, fallback: str | None = None) -> str:
+    name = (raw_name or "").strip()
+    name = re.sub(r"[\x00-\x1f\x7f]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
+    if not name:
+        name = (fallback or "").strip()
+    if not name:
+        name = f"URL {int(time.time())}"
+
+    if len(name) > MAX_URL_NAME_LEN:
+        name = name[:MAX_URL_NAME_LEN].rstrip()
+
+    return name
 
 
 def _pick_first(item: dict, keys: list[str]):
@@ -2251,7 +2268,7 @@ async def buttons_handler(message: types.Message):
             return await safe_delete(message)
 
         if mode == "add_url_name":
-            name = (text or "").strip()
+            name = sanitize_url_name(text)
             url = user_pending_url.get(user_id)
             user_pending_url[user_id] = None
             user_modes[user_id] = None
@@ -2260,16 +2277,13 @@ async def buttons_handler(message: types.Message):
                 await send_screen(chat_id, user_id, "⚠️ Не нашёл ожидаемый URL. Нажми ➕ Добавить URL ещё раз.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            if not name:
-                name = f"URL {int(time.time())}"
-
             await db_add_url(user_id, url, name)
             user_urls[user_id] = await db_get_urls(user_id)
             await send_screen(chat_id, user_id, f"✅ URL добавлен: <b>{html.escape(name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
         if mode == "rename_url_name":
-            new_name = (text or "").strip()
+            new_name = sanitize_url_name(text)
             user_modes[user_id] = None
             url = user_pending_rename_url.get(user_id)
             user_pending_rename_url[user_id] = None
@@ -2277,10 +2291,6 @@ async def buttons_handler(message: types.Message):
             if not url:
                 await send_screen(chat_id, user_id, "⚠️ Не нашёл URL для переименования. Повтори ✏️ Переименовать URL.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
-            if not new_name:
-                await send_screen(chat_id, user_id, "❌ Название не может быть пустым.", reply_markup=kb_urls_menu())
-                return await safe_delete(message)
-
             await db_set_url_name(user_id, url, new_name)
             user_urls[user_id] = await db_get_urls(user_id)
             await send_screen(chat_id, user_id, f"✅ Переименовано в: <b>{html.escape(new_name)}</b>", reply_markup=kb_urls_menu(), parse_mode="HTML")
@@ -2373,6 +2383,7 @@ async def buttons_handler(message: types.Message):
                 "📚 Мои URL → управление источниками.\n"
                 "🚀 Старт охотника → максимально быстрый классический режим.\n"
                 "🛒 Обычный автобай включается по конкретному URL.\n\n"
+                f"✏️ Названия URL автоматически очищаются и ограничены {MAX_URL_NAME_LEN} символами.\n"
                 f"🧾 Лог автобая: {AUTOBUY_LOG_FILE}",
                 reply_markup=kb_main(user_id),
                 parse_mode="HTML",
