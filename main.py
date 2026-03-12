@@ -211,6 +211,30 @@ APP_TEMPLATE_HTML = """<!doctype html>
       font-size: 12px;
     }
 
+    .cat-banner {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 8px;
+      margin-bottom: 10px;
+      padding: 6px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(47, 14, 25, 0.8);
+      box-shadow: var(--shadow);
+    }
+
+    .cat-face { font-size: 30px; line-height: 1; }
+    .cat-paw {
+      font-size: 24px;
+      transform-origin: bottom center;
+      animation: paw-wave 1.1s ease-in-out infinite;
+    }
+
+    @keyframes paw-wave {
+      0%, 100% { transform: translateY(0) rotate(0deg); }
+      50% { transform: translateY(-8px) rotate(-12deg); }
+    }
+
     .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
     .tab {
       border-radius: 12px;
@@ -226,8 +250,21 @@ APP_TEMPLATE_HTML = """<!doctype html>
       background: linear-gradient(120deg, var(--accent), var(--accent-2));
     }
 
-    .panel { display: none; }
-    .panel.active { display: block; }
+    .panel {
+      opacity: 0;
+      transform: translateY(10px);
+      max-height: 0;
+      overflow: hidden;
+      pointer-events: none;
+      transition: opacity .24s ease, transform .24s ease, max-height .24s ease;
+    }
+    .panel.active {
+      opacity: 1;
+      transform: translateY(0);
+      max-height: 1000vh;
+      overflow: visible;
+      pointer-events: auto;
+    }
 
     .grid {
       display: grid;
@@ -271,6 +308,24 @@ APP_TEMPLATE_HTML = """<!doctype html>
     .btn-ok { border: 0; background: linear-gradient(110deg, #1e9f71, #44d39d); }
     .btn-danger { border: 1px solid #8f324f; background: #2f101a; color: #ffabc1; }
     .btn-soft { border: 1px solid #8b3854; background: #421524; color: #ffd3de; }
+
+    .switching { transform: scale(.98); filter: brightness(1.07); }
+
+    .link-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      background: #3a1322;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+      transition: .18s ease;
+    }
+
+    .link-btn:hover { transform: translateY(-1px); border-color: var(--accent); }
 
     .status {
       border-radius: 12px;
@@ -363,6 +418,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
 </head>
 <body>
   <main class="app">
+    <div class="cat-banner" aria-hidden="true"><span class="cat-face">🐱</span><span class="cat-paw">🐾</span></div>
     <section class="hero">
       <h1>⚡ Parsing Hunter</h1>
       <p>Полноценное локальное приложение: управление источниками, автоскан, автобай, журнал событий, история новых лотов, экспорт и импорт данных. Файл можно открыть на Android, Windows, macOS, Linux — всё хранится локально в браузере.</p>
@@ -401,11 +457,13 @@ APP_TEMPLATE_HTML = """<!doctype html>
         </article>
 
         <article class="card">
-          <h3>Полезные ссылки</h3>
-          <div class="muted">Ссылки отображаются сразу при запуске приложения.</div>
+          <h3>Главные рычаги</h3>
+          <div class="muted">Быстрые кнопки управления и переходов.</div>
           <div class="row" style="margin-top:8px">
-            <a class="pill" href="https://t.me/+wHlSL7Ij2rpjYmFi" target="_blank" rel="noopener noreferrer">🛟 Канал поддержки</a>
-            <a class="pill" href="https://t.me/StaliNusshhAaaaaa" target="_blank" rel="noopener noreferrer">👨‍💻 Создатель</a>
+            <button class="btn-ok" onclick="toggleAutobuyAll()" id="dashAutobuyBtn">🔴 Автобай на всех ссылках: ВЫКЛ</button>
+            <a class="link-btn" href="https://t.me/StaliNusshhAaaaaa" target="_blank" rel="noopener noreferrer">🤖 Открыть Telegram-бота</a>
+            <a class="link-btn" href="https://t.me/+wHlSL7Ij2rpjYmFi" target="_blank" rel="noopener noreferrer">🛟 Канал поддержки</a>
+            <a class="link-btn" href="https://github.com" target="_blank" rel="noopener noreferrer">🧬 Репозиторий кода</a>
           </div>
         </article>
 
@@ -468,15 +526,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
           <div style="height:8px"></div>
           <label class="muted">Скорость автобая (мс между попытками)</label>
           <input type="number" min="0" max="10000" id="autobuyDelayMs" />
-          <div style="height:8px"></div>
-          <label class="muted">Макс. покупок за цикл</label>
-          <input type="number" min="1" max="100" id="maxAutobuyPerCycle" />
-          <div style="height:8px"></div>
-          <label class="muted">Минимальная цена для автобая</label>
-          <input type="number" min="0" max="99999999" id="autobuyMinPrice" />
-          <div style="height:8px"></div>
-          <label class="muted">Максимальная цена для автобая</label>
-          <input type="number" min="0" max="99999999" id="autobuyMaxPrice" />
+
           <div class="row" style="margin-top:8px">
             <button class="btn-ok" onclick="saveSettings()">💾 Сохранить</button>
             <button class="btn-soft" onclick="applyMinPreset()">🧊 Минимальные значения</button>
@@ -502,7 +552,7 @@ APP_TEMPLATE_HTML = """<!doctype html>
           <h3>Справка по настройкам</h3>
           <details class="guide">
             <summary>📖 Открыть / свернуть описание параметров</summary>
-            <div class="muted">• Интервал автоскана — как часто выполняется сканирование.<br/>• Макс. лотов с источника — ограничение объёма данных за один проход.<br/>• Таймаут запроса — сколько ждать ответ API.<br/>• Скорость автобая — пауза между покупками (0 = максимально быстро).<br/>• Макс. покупок за цикл — ограничение числа покупок за один скан.<br/>• Мин/макс цена — фильтр, что именно покупать автоматически.<br/>• Вкладка «Источники» позволяет включать/выключать автобай для каждого URL.</div>
+            <div class="muted">• Интервал автоскана — как часто выполняется сканирование.<br/>• Макс. лотов с источника — объём данных за один проход.<br/>• Таймаут запроса — сколько ждать ответ API.<br/>• Скорость автобая — пауза между покупками (0 = максимально быстро).<br/>• Автобай покупает все доступные лоты по включённым URL, пока хватает баланса.<br/>• Вкладка «Источники» позволяет включать/выключать автобай для каждого URL.</div>
           </details>
         </article>
       </div>
@@ -524,9 +574,6 @@ const DEFAULTS = {
     maxItemsPerSource: 1,
     timeoutMs: 150,
     autobuyDelayMs: 0,
-    maxAutobuyPerCycle: 1,
-    autobuyMinPrice: 0,
-    autobuyMaxPrice: 0,
     notifications: false
   }
 };
@@ -571,6 +618,11 @@ function setStatus(text, kind='info'){
 function switchTab(tab){
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === tab));
+  const activeTab = document.querySelector(`.tab[data-tab="${tab}"]`);
+  if(activeTab){
+    activeTab.classList.add('switching');
+    setTimeout(() => activeTab.classList.remove('switching'), 220);
+  }
 }
 
 function cleanUrl(url){ return String(url || '').trim(); }
@@ -613,6 +665,7 @@ function toggleSource(id){
   src.enabled = !src.enabled;
   saveState();
   renderSources();
+  syncAutobuyAllBtn();
   log(`${src.enabled ? 'Включён' : 'Отключён'} источник: ${src.name}`);
 }
 
@@ -622,6 +675,7 @@ function toggleAutobuySource(id){
   src.autobuy = !src.autobuy;
   saveState();
   renderSources();
+  syncAutobuyAllBtn();
   log(`Автобай ${src.autobuy ? 'включён' : 'выключен'}: ${src.name}`);
 }
 
@@ -739,18 +793,10 @@ async function runScanNow(){
       if(added) log(`${s.name}: найдено ${added} новых`, 'ok');
 
       if(s.autobuy){
-        const limit = Number(state.settings.maxAutobuyPerCycle) || 1;
         const delay = Math.max(0, Number(state.settings.autobuyDelayMs) || 0);
-        const minPrice = Math.max(0, Number(state.settings.autobuyMinPrice) || 0);
-        const maxPrice = Math.max(0, Number(state.settings.autobuyMaxPrice) || 0);
-        const sourceLots = state.lots.filter(l => l.sourceUrl === s.url).slice(0, 200);
+        const sourceLots = state.lots.filter(l => l.sourceUrl === s.url).slice(0, 1000);
         for(const lot of sourceLots){
-          if(boughtCount >= limit) break;
-          const price = Number(lot.price ?? lot.priceText);
-          if(Number.isFinite(price)){
-            if(price < minPrice) continue;
-            if(maxPrice > 0 && price > maxPrice) continue;
-          }
+          if(lot.autoBuyAt) continue;
           lot.autoBuyAt = Date.now();
           boughtCount += 1;
           log(`🛒 Автобай: ${s.name} → ${lot.title}`, 'ok');
@@ -778,6 +824,40 @@ async function runScanNow(){
   } else {
     setStatus('Новых лотов не найдено.', 'warn');
   }
+}
+
+
+function isAutobuyAllEnabled(){
+  const active = state.sources.filter(s => s.enabled);
+  return active.length > 0 && active.every(s => s.autobuy);
+}
+
+function syncAutobuyAllBtn(animated=false){
+  const btn = document.getElementById('dashAutobuyBtn');
+  if(!btn) return;
+  const enabled = isAutobuyAllEnabled();
+  btn.textContent = enabled ? '🟢 Автобай на всех ссылках: ВКЛ' : '🔴 Автобай на всех ссылках: ВЫКЛ';
+  if(animated){
+    btn.classList.remove('switching');
+    void btn.offsetWidth;
+    btn.classList.add('switching');
+    setTimeout(() => btn.classList.remove('switching'), 220);
+  }
+}
+
+function toggleAutobuyAll(){
+  const targets = state.sources.filter(s => s.enabled);
+  if(!targets.length){
+    toast('Нет включённых источников для автобая.', 'warn');
+    return;
+  }
+  const makeEnabled = !targets.every(s => s.autobuy);
+  for(const s of targets) s.autobuy = makeEnabled;
+  saveState();
+  renderSources();
+  syncAutobuyAllBtn(true);
+  log(`Автобай на всех включённых ссылках: ${makeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`, makeEnabled ? 'ok' : 'warn');
+  toast(`Автобай на всех включённых ссылках: ${makeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`, makeEnabled ? 'ok' : 'warn');
 }
 
 function toggleHunter(){
@@ -855,9 +935,6 @@ function saveSettings(){
   state.settings.maxItemsPerSource = clamp(Number(document.getElementById('maxItems').value) || 1, 1, 1000);
   state.settings.timeoutMs = clamp(Number(document.getElementById('timeoutMs').value) || 150, 150, 30000);
   state.settings.autobuyDelayMs = clamp(Number(document.getElementById('autobuyDelayMs').value) || 0, 0, 10000);
-  state.settings.maxAutobuyPerCycle = clamp(Number(document.getElementById('maxAutobuyPerCycle').value) || 1, 1, 100);
-  state.settings.autobuyMinPrice = clamp(Number(document.getElementById('autobuyMinPrice').value) || 0, 0, 99999999);
-  state.settings.autobuyMaxPrice = clamp(Number(document.getElementById('autobuyMaxPrice').value) || 0, 0, 99999999);
   saveState();
   toast('Настройки сохранены', 'ok');
   if(hunterTimer){
@@ -874,9 +951,6 @@ function applyMinPreset(){
   document.getElementById('maxItems').value = 1;
   document.getElementById('timeoutMs').value = 150;
   document.getElementById('autobuyDelayMs').value = 0;
-  document.getElementById('maxAutobuyPerCycle').value = 1;
-  document.getElementById('autobuyMinPrice').value = 0;
-  document.getElementById('autobuyMaxPrice').value = 0;
   saveSettings();
 }
 
@@ -948,10 +1022,8 @@ function init(){
   document.getElementById('maxItems').value = state.settings.maxItemsPerSource;
   document.getElementById('timeoutMs').value = state.settings.timeoutMs;
   document.getElementById('autobuyDelayMs').value = state.settings.autobuyDelayMs ?? 0;
-  document.getElementById('maxAutobuyPerCycle').value = state.settings.maxAutobuyPerCycle ?? 1;
-  document.getElementById('autobuyMinPrice').value = state.settings.autobuyMinPrice ?? 0;
-  document.getElementById('autobuyMaxPrice').value = state.settings.autobuyMaxPrice ?? 0;
   document.getElementById('notifyBtn').textContent = state.settings.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления';
+  syncAutobuyAllBtn();
 
   renderSources();
   renderLots();
