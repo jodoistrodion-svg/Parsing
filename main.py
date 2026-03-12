@@ -790,7 +790,18 @@ function normalizeItems(data){
   return [];
 }
 
-function pickId(item){ return String(item.item_id || item.id || item.itemId || item.lot_id || ''); }
+function pickId(item){
+  const rawId = item.item_id ?? item.id ?? item.itemId ?? item.lot_id;
+  if(rawId !== undefined && rawId !== null && String(rawId).trim() !== ''){
+    return `id::${String(rawId).trim()}`;
+  }
+
+  const title = String(item.title ?? item.name ?? '').trim();
+  const price = String(item.price ?? item.amount ?? item.cost ?? item.sum ?? '').trim();
+  const link = String(item.url ?? item.link ?? '').trim();
+  if(!title && !price && !link) return '';
+  return `noid::${title}::${price}::${link}`;
+}
 
 function parsePrice(item){
   const raw = item.price ?? item.amount ?? item.cost ?? item.sum;
@@ -799,7 +810,8 @@ function parsePrice(item){
 }
 
 function makeLot(item, source){
-  const id = pickId(item) || cryptoRandomId();
+  const key = pickId(item);
+  const id = key || cryptoRandomId();
   return {
     id,
     sourceName: source.name,
@@ -833,10 +845,10 @@ async function scanSource(source){
   let added = 0;
 
   for(const item of items){
-    const itemId = pickId(item);
-    if(!itemId) continue;
-    if(seenMap[itemId]) continue;
-    seenMap[itemId] = 1;
+    const itemKey = pickId(item);
+    if(!itemKey) continue;
+    if(seenMap[itemKey]) continue;
+    seenMap[itemKey] = 1;
 
     const lot = makeLot(item, source);
     state.lots.unshift(lot);
