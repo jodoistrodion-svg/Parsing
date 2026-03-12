@@ -62,15 +62,15 @@ URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.0").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "3").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.002").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.008").strip())
-AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.02").strip())
-AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.05").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.09").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
+AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
+AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.001").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.06").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "3").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "8").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "2.20").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "60").strip())
 
 # ====================== LOGGING ======================
@@ -1622,12 +1622,13 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     last_err = "unknown"
     session = await get_session()
     request_attempts = 0
-    deadline = t0 + max(0.2, AUTOBUY_MAX_DURATION_SEC)
+    unlimited_http_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS <= 0
+    deadline = None if AUTOBUY_MAX_DURATION_SEC <= 0 else (t0 + max(0.2, AUTOBUY_MAX_DURATION_SEC))
 
     async with buy_semaphore:
         if fast_url:
             try:
-                if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
                     return False, last_err
                 request_attempts += 1
                 bucket, min_interval = _api_limit_bucket("POST", fast_url)
@@ -1658,7 +1659,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
                     if retry_as_form:
                         try:
-                            if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                            if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
                                 return False, last_err
                             request_attempts += 1
                             bucket, min_interval = _api_limit_bucket("POST", fast_url)
@@ -1710,7 +1711,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
         for payload_idx, payload, buy_url in attempt_pairs:
             need_form_retry = False
             try:
-                if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
                     return False, last_err
                 request_attempts += 1
                 bucket, min_interval = _api_limit_bucket("POST", buy_url)
@@ -1755,7 +1756,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                 continue
 
             try:
-                if request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS or time.perf_counter() >= deadline:
+                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
                     return False, last_err
                 request_attempts += 1
                 bucket, min_interval = _api_limit_bucket("POST", buy_url)
@@ -1803,17 +1804,21 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
     lock = get_buy_lock(item_key)
 
     attempts = AUTOBUY_RETRY_ATTEMPTS
+    unlimited_attempts = attempts <= 0
     min_delay = AUTOBUY_RETRY_MIN_DELAY
     max_delay = AUTOBUY_RETRY_MAX_DELAY
 
     async with lock:
         last_result = (False, "unknown")
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        while unlimited_attempts or attempt < attempts:
+            attempt += 1
             bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
             last_result = (bought, info)
 
             if bought:
-                return True, f"attempt={attempt}/{attempts} | {info}"
+                attempts_label = "∞" if unlimited_attempts else str(attempts)
+                return True, f"attempt={attempt}/{attempts_label} | {info}"
 
             low = (info or "").lower()
             terminal = any(x in low for x in [
@@ -1822,17 +1827,21 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                 "аккаунт продан",
             ])
             if terminal:
-                return False, f"attempt={attempt}/{attempts} | {info}"
+                attempts_label = "∞" if unlimited_attempts else str(attempts)
+                return False, f"attempt={attempt}/{attempts_label} | {info}"
 
-            if attempt < attempts:
-                if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
-                    delay = random.uniform(AUTOBUY_QUEUE_RETRY_MIN_DELAY, AUTOBUY_QUEUE_RETRY_MAX_DELAY)
-                else:
-                    delay = random.uniform(min_delay, max_delay)
+            if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
+                delay = random.uniform(AUTOBUY_QUEUE_RETRY_MIN_DELAY, AUTOBUY_QUEUE_RETRY_MAX_DELAY)
+            else:
+                delay = random.uniform(min_delay, max_delay)
+
+            if delay > 0:
                 log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} attempt={attempt} sleep={delay:.3f}s")
                 await asyncio.sleep(delay)
+            else:
+                await asyncio.sleep(0)
 
-        return last_result[0], f"attempt={attempts}/{attempts} | {last_result[1]}"
+        return last_result[0], f"attempt={attempt}/{attempts} | {last_result[1]}"
 
 
 # ====================== REPORTER ======================
