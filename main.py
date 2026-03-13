@@ -52,6 +52,7 @@ LIMITED_EXTRA_DELAY = 0.0
 MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "1000").strip())
 SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.1").strip())
 OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.1").strip())
+BUY_MIN_REQUEST_INTERVAL = float((os.getenv("BUY_MIN_REQUEST_INTERVAL") or "0.0").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -1061,7 +1062,17 @@ def _is_search_endpoint(url: str) -> bool:
     return False
 
 
+def _is_buy_endpoint(url: str) -> bool:
+    try:
+        path = (urlsplit(url).path or "").strip().lower()
+    except Exception:
+        return False
+    return "buy" in path
+
+
 def _api_limit_bucket(method: str, url: str) -> tuple[str, float]:
+    if method.upper() == "POST" and _is_buy_endpoint(url):
+        return "buy-global", BUY_MIN_REQUEST_INTERVAL
     if method.upper() == "GET" and _is_search_endpoint(url):
         return "search-global", SEARCH_MIN_REQUEST_INTERVAL
     return "other-global", OTHER_MIN_REQUEST_INTERVAL
