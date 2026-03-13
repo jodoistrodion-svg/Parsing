@@ -65,15 +65,15 @@ USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.1").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.1").strip())
-AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.1").strip())
-AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.1").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.04").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "1").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
+AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
+AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.0").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.10").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "6").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0.90").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
 # ====================== LOGGING ======================
@@ -1782,6 +1782,64 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                 last_err = f"{fast_url} -> fast_buy_timeout"
             except Exception as e:
                 last_err = f"{fast_url} -> {e}"
+
+        parallel_urls = [u for u in buy_urls if u != fast_url][:3]
+        if parallel_urls and (deadline is None or time.perf_counter() < deadline):
+            async def _parallel_try(url: str):
+                bucket, min_interval = _api_limit_bucket("POST", url)
+                await request_rate_limiter.wait(bucket, min_interval)
+                async with session.post(url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
+                    body = await resp.text()
+                    state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
+                    return url, resp.status, state, info, retry_as_form
+
+            tasks = [asyncio.create_task(_parallel_try(url)) for url in parallel_urls]
+            try:
+                for done in asyncio.as_completed(tasks):
+                    try:
+                        if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
+                            break
+                        request_attempts += 1
+                        buy_url, status_code, state, info, _ = await done
+                        if status_code not in (404, 405):
+                            log_autobuy(
+                                f"BUY_PARALLEL item_id={item_id} status={status_code} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                            )
+                        if state == "success":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            return True, f"{buy_url} -> {info}"
+                        if state == "auth":
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            return False, f"{buy_url} -> HTTP {status_code}: ошибка авторизации API ({info})"
+                        if state == "secret":
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                        if state == "terminal":
+                            _remember_autobuy_endpoint(source_url, buy_url)
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            return False, f"{buy_url} -> {info}"
+                        if state == "queue":
+                            last_err = f"{buy_url} -> queue: {info}"
+                        else:
+                            last_err = f"{buy_url} -> HTTP {status_code}: {info}"
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        last_err = f"parallel -> {e}"
+                        continue
+            finally:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
 
         attempt_pairs = []
         for payload_idx, payload in enumerate(payload_variants, start=1):
