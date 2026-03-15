@@ -36,8 +36,8 @@ OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.70").strip())
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.32").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.35").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.20").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
 
@@ -53,7 +53,7 @@ MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "1000").s
 SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.0").strip())
 OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
 BUY_MIN_REQUEST_INTERVAL = float((os.getenv("BUY_MIN_REQUEST_INTERVAL") or "0.0").strip())
-NON_AUTOBUY_CYCLE_EVERY = int((os.getenv("NON_AUTOBUY_CYCLE_EVERY") or "5").strip())
+NON_AUTOBUY_CYCLE_EVERY = int((os.getenv("NON_AUTOBUY_CYCLE_EVERY") or "12").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -70,10 +70,10 @@ AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.0").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.14").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "10").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "1.60").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0.90").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
 # ====================== LOGGING ======================
@@ -508,34 +508,19 @@ async def send_screen(chat_id: int, user_id: int, text: str, reply_markup: Reply
     return msg
 
 
-async def upsert_no_lots_message(chat_id: int, user_id: int, text: str):
+async def clear_no_lots_message(chat_id: int, user_id: int):
     if bot is None:
         return
 
     mid = user_no_lots_msg_id.get(user_id)
-    if mid:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=mid,
-                text=text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return
-        except TelegramBadRequest:
-            pass
-        except Exception:
-            pass
+    if not mid:
+        return
 
     try:
-        msg = await send_bot_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
-        user_no_lots_msg_id[user_id] = msg.message_id
+        await bot.delete_message(chat_id, mid)
     except Exception:
         pass
 
-
-def reset_no_lots_message(user_id: int):
     user_no_lots_msg_id[user_id] = None
 
 
@@ -2250,7 +2235,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     user_buy_inflight[user_id].clear()
     ensure_notify_worker(user_id)
-    no_lots_streak = 0
     cycle_num = 0
     pending_autobuy_tasks: set[asyncio.Task] = set()
 
@@ -2313,21 +2297,8 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
                     break
 
-            if new_items_processed == 0:
-                no_lots_streak += 1
-                ts = time.strftime("%H:%M:%S", time.localtime())
-                await upsert_no_lots_message(
-                    chat_id,
-                    user_id,
-                    (
-                        "ℹ️ <b>Новых лотов пока нет</b>\n"
-                        f"• Обновлено: <b>{ts}</b>\n"
-                        f"• Пустых циклов подряд: <b>{no_lots_streak}</b>"
-                    ),
-                )
-            else:
-                no_lots_streak = 0
-                reset_no_lots_message(user_id)
+            if new_items_processed > 0:
+                await clear_no_lots_message(chat_id, user_id)
 
             await db_mark_seen_batch(user_id, seen_batch)
             await asyncio.sleep(await user_hunter_interval(user_id))
@@ -2660,6 +2631,7 @@ async def buttons_handler(message: types.Message):
                     log_autobuy(f"HUNTER_RESET_MODE user_id={user_id} mode={requested_mode} treat_all_as_new=1")
 
                 user_history_reset_pending[user_id] = False
+                await clear_no_lots_message(chat_id, user_id)
 
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
@@ -2675,6 +2647,7 @@ async def buttons_handler(message: types.Message):
             if task:
                 task.cancel()
                 user_hunter_tasks.pop(user_id, None)
+            await clear_no_lots_message(chat_id, user_id)
             log_autobuy(f"HUNTER_STOP user_id={user_id}")
             await send_screen(chat_id, user_id, "🛑 Охотник остановлен.", reply_markup=kb_main(user_id))
             return await safe_delete(message)
