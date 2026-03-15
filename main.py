@@ -1706,8 +1706,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     if AUTOBUY_URL_LIMIT > 0:
         buy_urls = buy_urls[:AUTOBUY_URL_LIMIT]
 
-    buy_url = buy_urls[0] if buy_urls else None
-    if not buy_url:
+    if not buy_urls:
         return False, "buy_url_not_found"
 
     payload = {"balance_id": LZT_BALANCE_ID}
@@ -1718,9 +1717,12 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     if found_perf is not None:
         since_found_ms = int((t0 - found_perf) * 1000)
 
+    max_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS if AUTOBUY_MAX_HTTP_ATTEMPTS > 0 else len(buy_urls)
+    attempt_urls = buy_urls[:max_attempts]
+
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} direct_mode=1 url={buy_url}"
+        f"since_found_ms={since_found_ms} urls={len(attempt_urls)}"
     )
 
     session = await get_session()
@@ -1728,35 +1730,41 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     headers_json = {**common_headers, "Content-Type": "application/json"}
 
     async with buy_semaphore:
-        try:
-            bucket, min_interval = _api_limit_bucket("POST", buy_url)
-            await request_rate_limiter.wait(bucket, min_interval)
-            async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
-                body = await resp.text()
-                state, info, _ = _autobuy_classify_response(resp.status, body)
-                log_autobuy(
-                    f"BUY_DIRECT item_id={item_id} status={resp.status} state={state} "
-                    f"url={buy_url} info='{_safe_compact(info,220)}'"
-                )
+        last_error = "no_attempts"
+        for idx, buy_url in enumerate(attempt_urls, start=1):
+            try:
+                bucket, min_interval = _api_limit_bucket("POST", buy_url)
+                await request_rate_limiter.wait(bucket, min_interval)
+                async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
+                    body = await resp.text()
+                    state, info, _ = _autobuy_classify_response(resp.status, body)
+                    log_autobuy(
+                        f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
+                        f"status={resp.status} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                    )
 
-                if state == "success":
-                    _remember_autobuy_endpoint(source_url, buy_url)
-                    return True, f"{buy_url} -> {info}"
-                if state == "auth":
-                    return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
-                if state == "secret":
-                    return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                if state == "terminal":
-                    _remember_autobuy_endpoint(source_url, buy_url)
-                    return False, f"{buy_url} -> {info}"
-                if state == "queue":
-                    return False, f"{buy_url} -> queue: {info}"
+                    if state == "success":
+                        _remember_autobuy_endpoint(source_url, buy_url)
+                        return True, f"{buy_url} -> {info}"
+                    if state == "auth":
+                        return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
+                    if state == "secret":
+                        return False, f"{buy_url} -> требуется ручная проверка/секретный ответ ({info})"
+                    if state == "terminal":
+                        _remember_autobuy_endpoint(source_url, buy_url)
+                        return False, f"{buy_url} -> {info}"
+                    if state == "queue":
+                        return False, f"{buy_url} -> queue: {info}"
 
-                return False, f"{buy_url} -> HTTP {resp.status}: {info}"
-        except asyncio.TimeoutError:
-            return False, f"{buy_url} -> buy_timeout"
-        except Exception as e:
-            return False, f"{buy_url} -> {e}"
+                    last_error = f"{buy_url} -> HTTP {resp.status}: {info}"
+                    if _autobuy_is_terminal_failure(state, resp.status, info):
+                        return False, last_error
+            except asyncio.TimeoutError:
+                last_error = f"{buy_url} -> buy_timeout"
+            except Exception as e:
+                last_error = f"{buy_url} -> {e}"
+
+        return False, last_error
 
 
 async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = None):
