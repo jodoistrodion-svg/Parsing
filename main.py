@@ -1356,21 +1356,33 @@ async def iter_sources_results_split(user_id: int, include_non_autobuy: bool):
     autobuy_sources = [s for s in sources if s.get("autobuy", False)]
     plain_sources = [s for s in sources if not s.get("autobuy", False)]
 
-    scheduled = autobuy_sources + (plain_sources if include_non_autobuy else [])
-    if not scheduled:
+    if not autobuy_sources and not (include_non_autobuy and plain_sources):
         return
 
-    tasks = [asyncio.create_task(_fetch_source_items(s)) for s in scheduled]
-    try:
-        for fut in asyncio.as_completed(tasks):
-            try:
-                yield await fut
-            except Exception as e:
-                yield {"idx": -1, "url": "UNKNOWN", "name": "UNKNOWN", "enabled": True, "autobuy": False}, [], str(e)
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
+    async def _run_group(group_sources: list[dict]):
+        if not group_sources:
+            return
+
+        tasks = [asyncio.create_task(_fetch_source_items(s)) for s in group_sources]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    yield await fut
+                except Exception as e:
+                    yield {"idx": -1, "url": "UNKNOWN", "name": "UNKNOWN", "enabled": True, "autobuy": False}, [], str(e)
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+
+    # В первую очередь опрашиваем URL с автобаем, чтобы не ставить покупку
+    # в очередь за обычными источниками на глобальном rate-limit bucket.
+    async for result in _run_group(autobuy_sources):
+        yield result
+
+    if include_non_autobuy:
+        async for result in _run_group(plain_sources):
+            yield result
 
 
 # ====================== DISPLAY ======================
