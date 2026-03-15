@@ -36,8 +36,8 @@ OWNER_IDS = {OWNER_ID}
 
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.35").strip())
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.20").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.70").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.32").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
 
@@ -53,7 +53,7 @@ MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "1000").s
 SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.0").strip())
 OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
 BUY_MIN_REQUEST_INTERVAL = float((os.getenv("BUY_MIN_REQUEST_INTERVAL") or "0.0").strip())
-NON_AUTOBUY_CYCLE_EVERY = int((os.getenv("NON_AUTOBUY_CYCLE_EVERY") or "12").strip())
+NON_AUTOBUY_CYCLE_EVERY = int((os.getenv("NON_AUTOBUY_CYCLE_EVERY") or "5").strip())
 
 DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
@@ -70,10 +70,10 @@ AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.0").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.14").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "10").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0.90").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "1.60").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
 # ====================== LOGGING ======================
@@ -508,19 +508,34 @@ async def send_screen(chat_id: int, user_id: int, text: str, reply_markup: Reply
     return msg
 
 
-async def clear_no_lots_message(chat_id: int, user_id: int):
+async def upsert_no_lots_message(chat_id: int, user_id: int, text: str):
     if bot is None:
         return
 
     mid = user_no_lots_msg_id.get(user_id)
-    if not mid:
-        return
+    if mid:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=mid,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        except TelegramBadRequest:
+            pass
+        except Exception:
+            pass
 
     try:
-        await bot.delete_message(chat_id, mid)
+        msg = await send_bot_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        user_no_lots_msg_id[user_id] = msg.message_id
     except Exception:
         pass
 
+
+def reset_no_lots_message(user_id: int):
     user_no_lots_msg_id[user_id] = None
 
 
@@ -1465,38 +1480,6 @@ def make_card(item: dict, source_name: str) -> str:
 
 
 # ====================== AUTOBUY ======================
-def _autobuy_payload_variants(item: dict):
-    price = item.get("price")
-    payload = {"balance_id": LZT_BALANCE_ID}
-    if price is not None:
-        payload.update({"price": price, "item_price": price, "amount": price})
-
-    if LZT_SECRET_WORD:
-        payload.update({
-            "secret_answer": LZT_SECRET_WORD,
-            "secret_word": LZT_SECRET_WORD,
-            "secretWord": LZT_SECRET_WORD,
-            "qa_answer": LZT_SECRET_WORD,
-            "answer": LZT_SECRET_WORD,
-        })
-
-    variants = [
-        payload,
-        {**payload, "confirm": 1, "is_confirmed": True},
-        {k: v for k, v in payload.items() if k not in {"price", "item_price", "amount"}},
-    ]
-
-    dedup = []
-    seen = set()
-    for var in variants:
-        frozen = tuple(sorted(var.items()))
-        if frozen in seen:
-            continue
-        seen.add(frozen)
-        dedup.append(var)
-    return dedup
-
-
 def _autobuy_buy_urls(source_url: str, item_id: int):
     source_url = (source_url or "").strip()
     source_base = ""
@@ -1529,16 +1512,13 @@ def _autobuy_buy_urls(source_url: str, item_id: int):
     # Важно: первые URL используются в fast-режиме и ограничиваются AUTOBUY_URL_LIMIT.
     # Поэтому в приоритете оставляем API-пути, которые реально встречаются в маркет-API,
     # а web-путь item/{id}/buy убираем из ранних попыток (он часто 404).
-    fast_paths = ["{id}/fast-buy", "market/{id}/fast-buy", "{id}/buy", "market/{id}/buy"]
+    fast_paths = [
+        "{id}/confirm-buy",
+        "market/{id}/confirm-buy",
+    ]
     slow_paths = [
-        "{id}/purchase",
-        "market/{id}/purchase",
-        "item/{id}/fast-buy",
-        "item/{id}/buy",
-        "item/{id}/purchase",
-        "items/{id}/buy",
-        "items/{id}/fast-buy",
-        "items/{id}/purchase",
+        "item/{id}/confirm-buy",
+        "items/{id}/confirm-buy",
     ]
 
     urls = []
@@ -1708,16 +1688,17 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     t0 = time.perf_counter()
     source_name = (source.get("name") or "UNKNOWN").strip()
     source_url = (source.get("url") or "").strip()
-    common_headers = _default_api_headers()
-    headers_json = {**common_headers, "Content-Type": "application/json"}
-    headers_form = dict(common_headers)
-    payload_variants = _autobuy_payload_variants(item)
     buy_urls = _autobuy_prioritized_urls(source_url, item_id)
     if AUTOBUY_URL_LIMIT > 0:
         buy_urls = buy_urls[:AUTOBUY_URL_LIMIT]
 
-    fast_payload = payload_variants[0] if payload_variants else {"balance_id": LZT_BALANCE_ID}
-    fast_url = buy_urls[0] if buy_urls else None
+    buy_url = buy_urls[0] if buy_urls else None
+    if not buy_url:
+        return False, "buy_url_not_found"
+
+    payload = {"balance_id": LZT_BALANCE_ID}
+    if LZT_SECRET_WORD:
+        payload["secret_answer"] = LZT_SECRET_WORD
 
     since_found_ms = None
     if found_perf is not None:
@@ -1725,467 +1706,52 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} urls={len(buy_urls)} payloads={len(payload_variants)}"
+        f"since_found_ms={since_found_ms} direct_mode=1 url={buy_url}"
     )
 
-    last_err = "unknown"
     session = await get_session()
-    request_attempts = 0
-    unlimited_http_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS <= 0
-    deadline = None if AUTOBUY_MAX_DURATION_SEC <= 0 else (t0 + max(0.2, AUTOBUY_MAX_DURATION_SEC))
+    common_headers = _default_api_headers()
+    headers_json = {**common_headers, "Content-Type": "application/json"}
 
     async with buy_semaphore:
-        if fast_url:
-            try:
-                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
-                    return False, last_err
-                request_attempts += 1
-                bucket, min_interval = _api_limit_bucket("POST", fast_url)
-                await request_rate_limiter.wait(bucket, min_interval)
-                async with session.post(fast_url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
-                    body = await resp.text()
-                    state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
-                    log_autobuy(
-                        f"BUY_FAST item_id={item_id} status={resp.status} state={state} url={fast_url} info='{_safe_compact(info,220)}'"
-                    )
-                    if state == "success":
-                        _remember_autobuy_endpoint(source_url, fast_url)
-                        return True, f"{fast_url} -> {info}"
-                    if state == "auth":
-                        return False, f"{fast_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
-                    if state == "secret":
-                        return False, f"{fast_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                    if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, fast_url)
-                        return False, f"{fast_url} -> {info}"
-                    if state == "queue":
-                        last_err = f"{fast_url} -> queue: {info}"
-                    else:
-                        last_err = f"{fast_url} -> HTTP {resp.status}: {info}"
+        try:
+            bucket, min_interval = _api_limit_bucket("POST", buy_url)
+            await request_rate_limiter.wait(bucket, min_interval)
+            async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
+                body = await resp.text()
+                state, info, _ = _autobuy_classify_response(resp.status, body)
+                log_autobuy(
+                    f"BUY_DIRECT item_id={item_id} status={resp.status} state={state} "
+                    f"url={buy_url} info='{_safe_compact(info,220)}'"
+                )
 
-                    if _autobuy_is_terminal_failure(state, resp.status, info):
-                        return False, last_err
+                if state == "success":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return True, f"{buy_url} -> {info}"
+                if state == "auth":
+                    return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
+                if state == "secret":
+                    return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
+                if state == "terminal":
+                    _remember_autobuy_endpoint(source_url, buy_url)
+                    return False, f"{buy_url} -> {info}"
+                if state == "queue":
+                    return False, f"{buy_url} -> queue: {info}"
 
-                    if retry_as_form:
-                        try:
-                            if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
-                                return False, last_err
-                            request_attempts += 1
-                            bucket, min_interval = _api_limit_bucket("POST", fast_url)
-                            await request_rate_limiter.wait(bucket, min_interval)
-                            async with session.post(fast_url, headers=headers_form, data=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as form_resp:
-                                form_body = await form_resp.text()
-                                form_state, form_info, _ = _autobuy_classify_response(form_resp.status, form_body)
-                                log_autobuy(
-                                    f"BUY_FAST_FORM item_id={item_id} status={form_resp.status} state={form_state} url={fast_url} info='{_safe_compact(form_info,220)}'"
-                                )
-                                if form_state == "success":
-                                    _remember_autobuy_endpoint(source_url, fast_url)
-                                    return True, f"{fast_url} (form) -> {form_info}"
-                                if form_state == "auth":
-                                    return False, f"{fast_url} (form) -> HTTP {form_resp.status}: ошибка авторизации API ({form_info})"
-                                if form_state == "secret":
-                                    return False, f"{fast_url} (form) -> нужен/неверный ответ на секретный вопрос ({form_info})"
-                                if form_state == "terminal":
-                                    _remember_autobuy_endpoint(source_url, fast_url)
-                                    return False, f"{fast_url} (form) -> {form_info}"
-                                if form_state == "queue":
-                                    last_err = f"{fast_url} (form) -> queue: {form_info}"
-                                else:
-                                    last_err = f"{fast_url} (form) -> HTTP {form_resp.status}: {form_info}"
-                                if _autobuy_is_terminal_failure(form_state, form_resp.status, form_info):
-                                    return False, last_err
-                        except asyncio.TimeoutError:
-                            last_err = f"{fast_url} (form) -> fast_buy_timeout"
-                        except Exception as e:
-                            last_err = f"{fast_url} (form) -> {e}"
-
-            except asyncio.TimeoutError:
-                last_err = f"{fast_url} -> fast_buy_timeout"
-            except Exception as e:
-                last_err = f"{fast_url} -> {e}"
-
-        parallel_urls = [u for u in buy_urls if u != fast_url][:3]
-        if parallel_urls and (deadline is None or time.perf_counter() < deadline):
-            async def _parallel_try(url: str):
-                bucket, min_interval = _api_limit_bucket("POST", url)
-                await request_rate_limiter.wait(bucket, min_interval)
-                async with session.post(url, headers=headers_json, json=fast_payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
-                    body = await resp.text()
-                    state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
-                    return url, resp.status, state, info, retry_as_form
-
-            tasks = [asyncio.create_task(_parallel_try(url)) for url in parallel_urls]
-            try:
-                for done in asyncio.as_completed(tasks):
-                    try:
-                        if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
-                            break
-                        request_attempts += 1
-                        buy_url, status_code, state, info, _ = await done
-                        if status_code not in (404, 405):
-                            log_autobuy(
-                                f"BUY_PARALLEL item_id={item_id} status={status_code} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                            )
-                        if state == "success":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            for t in tasks:
-                                if not t.done():
-                                    t.cancel()
-                            return True, f"{buy_url} -> {info}"
-                        if state == "auth":
-                            for t in tasks:
-                                if not t.done():
-                                    t.cancel()
-                            return False, f"{buy_url} -> HTTP {status_code}: ошибка авторизации API ({info})"
-                        if state == "secret":
-                            for t in tasks:
-                                if not t.done():
-                                    t.cancel()
-                            return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                        if state == "terminal":
-                            _remember_autobuy_endpoint(source_url, buy_url)
-                            for t in tasks:
-                                if not t.done():
-                                    t.cancel()
-                            return False, f"{buy_url} -> {info}"
-                        if state == "queue":
-                            last_err = f"{buy_url} -> queue: {info}"
-                        else:
-                            last_err = f"{buy_url} -> HTTP {status_code}: {info}"
-                    except asyncio.TimeoutError:
-                        continue
-                    except Exception as e:
-                        last_err = f"parallel -> {e}"
-                        continue
-            finally:
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-
-        attempt_pairs = []
-        for payload_idx, payload in enumerate(payload_variants, start=1):
-            for buy_url in buy_urls:
-                if buy_url == fast_url and payload_idx == 1:
-                    continue
-                attempt_pairs.append((payload_idx, payload, buy_url))
-
-        # Сначала пробуем все URL с базовым payload: это даёт более раннее попадание
-        # в рабочий эндпоинт, если у конкретного зеркала/домена отличается маршрут покупки.
-        buy_url_order = {u: i for i, u in enumerate(buy_urls)}
-        attempt_pairs.sort(key=lambda row: (0 if row[0] == 1 else 1, buy_url_order.get(row[2], 999), row[0]))
-
-        for payload_idx, payload, buy_url in attempt_pairs:
-            need_form_retry = False
-            try:
-                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
-                    return False, last_err
-                request_attempts += 1
-                bucket, min_interval = _api_limit_bucket("POST", buy_url)
-                await request_rate_limiter.wait(bucket, min_interval)
-                async with session.post(buy_url, headers=headers_json, json=payload, timeout=BUY_TIMEOUT) as resp:
-                    body = await resp.text()
-                    state, info, retry_as_form = _autobuy_classify_response(resp.status, body)
-
-                    if resp.status not in (404, 405):
-                        log_autobuy(
-                            f"BUY_TRY item_id={item_id} payload={payload_idx} status={resp.status} "
-                            f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                        )
-
-                    if state == "success":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return True, f"{buy_url} -> {info}"
-                    if state == "auth":
-                        return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
-                    if state == "secret":
-                        return False, f"{buy_url} -> нужен/неверный ответ на секретный вопрос ({info})"
-                    if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return False, f"{buy_url} -> {info}"
-                    if state == "queue":
-                        last_err = f"{buy_url} -> queue: {info}"
-                        continue
-
-                    last_err = f"{buy_url} -> HTTP {resp.status}: {info}"
-                    if _autobuy_is_terminal_failure(state, resp.status, info):
-                        return False, last_err
-                    need_form_retry = retry_as_form
-
-            except asyncio.TimeoutError:
-                last_err = f"{buy_url} -> buy_timeout"
-                continue
-            except Exception as e:
-                last_err = f"{buy_url} -> {e}"
-                continue
-
-            if not need_form_retry:
-                continue
-
-            try:
-                if (not unlimited_http_attempts and request_attempts >= AUTOBUY_MAX_HTTP_ATTEMPTS) or (deadline is not None and time.perf_counter() >= deadline):
-                    return False, last_err
-                request_attempts += 1
-                bucket, min_interval = _api_limit_bucket("POST", buy_url)
-                await request_rate_limiter.wait(bucket, min_interval)
-                async with session.post(buy_url, headers=headers_form, data=payload, timeout=BUY_TIMEOUT) as form_resp:
-                    form_body = await form_resp.text()
-                    state, info, _ = _autobuy_classify_response(form_resp.status, form_body)
-
-                    if form_resp.status not in (404, 405):
-                        log_autobuy(
-                            f"BUY_TRY_FORM item_id={item_id} payload={payload_idx} status={form_resp.status} "
-                            f"state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                        )
-
-                    if state == "success":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return True, f"{buy_url} (form) -> {info}"
-                    if state == "auth":
-                        return False, f"{buy_url} (form) -> HTTP {form_resp.status}: ошибка авторизации API ({info})"
-                    if state == "secret":
-                        return False, f"{buy_url} (form) -> нужен/неверный ответ на секретный вопрос ({info})"
-                    if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return False, f"{buy_url} (form) -> {info}"
-                    if state == "queue":
-                        last_err = f"{buy_url} (form) -> queue: {info}"
-                        continue
-
-                    last_err = f"{buy_url} (form) -> HTTP {form_resp.status}: {info}"
-                    if _autobuy_is_terminal_failure(state, form_resp.status, info):
-                        return False, last_err
-
-            except asyncio.TimeoutError:
-                last_err = f"{buy_url} (form) -> buy_timeout"
-                continue
-            except Exception as e:
-                last_err = f"{buy_url} (form) -> {e}"
-                continue
-
-    return False, last_err
+                return False, f"{buy_url} -> HTTP {resp.status}: {info}"
+        except asyncio.TimeoutError:
+            return False, f"{buy_url} -> buy_timeout"
+        except Exception as e:
+            return False, f"{buy_url} -> {e}"
 
 
 async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = None):
     item_key = make_item_key(item)
     lock = get_buy_lock(item_key)
 
-    attempts = AUTOBUY_RETRY_ATTEMPTS
-    unlimited_attempts = attempts <= 0
-    min_delay = AUTOBUY_RETRY_MIN_DELAY
-    max_delay = AUTOBUY_RETRY_MAX_DELAY
-
     async with lock:
-        last_result = (False, "unknown")
-        attempt = 0
-        while unlimited_attempts or attempt < attempts:
-            attempt += 1
-            bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
-            last_result = (bought, info)
-
-            if bought:
-                attempts_label = "∞" if unlimited_attempts else str(attempts)
-                return True, f"attempt={attempt}/{attempts_label} | {info}"
-
-            low = (info or "").lower()
-            terminal = any(x in low for x in [
-                "недостаточно", "already sold", "already purchased", "already bought",
-                "уже продан", "нельзя купить", "секрет", "secret", "auth", "401",
-                "аккаунт продан",
-            ])
-            if terminal:
-                attempts_label = "∞" if unlimited_attempts else str(attempts)
-                return False, f"attempt={attempt}/{attempts_label} | {info}"
-
-            if any(x in low for x in ["в очереди", "queue", "queued", "попробуйте повторить"]):
-                delay = random.uniform(AUTOBUY_QUEUE_RETRY_MIN_DELAY, AUTOBUY_QUEUE_RETRY_MAX_DELAY)
-            else:
-                delay = random.uniform(min_delay, max_delay)
-
-            if delay > 0:
-                log_autobuy(f"BUY_RETRY_WAIT item_key={item_key} attempt={attempt} sleep={delay:.3f}s")
-                await asyncio.sleep(delay)
-            else:
-                await asyncio.sleep(0)
-
-        return last_result[0], f"attempt={attempt}/{attempts} | {last_result[1]}"
-
-
-# ====================== REPORTER ======================
-async def error_reporter_loop():
-    while True:
-        try:
-            await asyncio.sleep(ERROR_REPORT_INTERVAL)
-            now = int(time.time())
-            for uid in list(user_started):
-                count = user_api_errors.get(uid, 0)
-                last = await db_get_last_report(uid)
-                if count and (now - last >= ERROR_REPORT_INTERVAL):
-                    try:
-                        await send_bot_message(uid, f"⚠️ За последний час ошибок API: <b>{count}</b>", parse_mode="HTML")
-                    except Exception:
-                        pass
-                    user_api_errors[uid] = 0
-                    await db_set_last_report(uid, now)
-        except Exception:
-            await asyncio.sleep(ERROR_REPORT_INTERVAL)
-
-
-# ====================== ACTIONS ======================
-async def show_denied(user_id: int, chat_id: int):
-    await send_screen(chat_id, user_id, DENIED_TEXT, reply_markup=kb_request())
-
-
-async def show_status(user_id: int, chat_id: int):
-    await load_user_data(user_id)
-    role = await get_user_role(user_id) or "not set"
-    active = user_search_active[user_id]
-    mode = user_hunter_mode[user_id]
-    all_sources = await get_all_sources(user_id, enabled_only=False)
-    enabled_sources = [s for s in all_sources if s.get("enabled", True)]
-    ab = sum(1 for s in all_sources if s.get("autobuy", False))
-    interval = await user_hunter_interval(user_id)
-    balance_text = await get_account_buy_balance_text()
-
-    mode_label = {"off": "ВЫКЛ", "classic": "КЛАССИЧЕСКИЙ"}.get(mode, mode.upper())
-
-    text = (
-        "<b>📊 Статус</b>\n"
-        f"• Роль: <b>{html.escape(role)}</b>\n"
-        f"• Охотник: <b>{'ВКЛ' if active else 'ВЫКЛ'}</b>\n"
-        f"• Режим: <b>{mode_label}</b>\n"
-        f"• Интервал цикла: <b>{interval:.2f} сек</b>\n"
-        f"• URL: <b>{len(enabled_sources)}/{len(all_sources)}</b> (автобай: <b>{ab}</b>)\n"
-        f"• Увидено: <b>{len(user_seen_items[user_id])}</b>\n"
-        f"• Попыток автобая: <b>{len(user_buy_attempted[user_id])}</b>\n"
-        f"• Balance ID: <code>{LZT_BALANCE_ID}</code>\n"
-        f"• Баланс покупки: <b>{html.escape(balance_text)}</b>\n"
-        f"• Ошибок API: <b>{user_api_errors.get(user_id, 0)}</b>\n"
-        f"• Лог: <code>{html.escape(AUTOBUY_LOG_FILE)}</code>"
-    )
-    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id), parse_mode="HTML")
-
-
-async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
-    await load_user_data(user_id)
-    sources = await get_all_sources(user_id, enabled_only=False)
-
-    if not sources:
-        await send_screen(chat_id, user_id, "📚 Список URL пуст.\nНажми ➕ Добавить URL", reply_markup=kb_urls_menu())
-        return
-
-    lines = ["📚 <b>Мои URL</b>\n(жми на кнопку снизу, чтобы посмотреть детали/состояние)"]
-    for s in sources:
-        idx = s["idx"]
-        name = s.get("name") or f"URL #{idx}"
-        st = "🟢" if s.get("enabled", True) else "🔴"
-        ab = "🛒" if s.get("autobuy", False) else "—"
-        lines.append(f"{st} {ab} <b>{idx}.</b> {html.escape(name)}")
-
-    kb = build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад")
-    user_modes[user_id] = "pick_list"
-    user_page_state[user_id] = {"ctx": "pick_list", "page": page}
-    await send_screen(chat_id, user_id, "\n".join(lines), reply_markup=kb, parse_mode="HTML")
-
-
-async def show_users_screen(owner_id: int, chat_id: int, page: int = 0):
-    rows = await db_list_users(limit=5000, offset=0)
-    total = len(rows)
-
-    rows_sorted = []
-    for uid, allowed, role in rows:
-        if uid in OWNER_IDS:
-            allowed = 1
-        rows_sorted.append((uid, allowed, role))
-    rows_sorted.sort(key=lambda x: (0 if x[0] in OWNER_IDS else 1, x[0]))
-
-    kb = build_users_picker_kb(rows_sorted, page=page)
-    user_modes[owner_id] = "users_pick"
-    user_page_state[owner_id] = {"ctx": "users_pick", "page": page}
-
-    txt = (
-        f"👥 <b>Пользователи</b>\n"
-        f"Всего в базе: <b>{total}</b>\n\n"
-        "Нажми на пользователя, чтобы переключить доступ ✅/⛔️"
-    )
-    await send_screen(chat_id, owner_id, txt, reply_markup=kb, parse_mode="HTML")
-
-
-async def send_compact_10_for_user(user_id: int, chat_id: int):
-    items_with_sources, errors = await fetch_all_sources(user_id)
-
-    if errors:
-        user_api_errors[user_id] += len(errors)
-        chunks = []
-        for label, url, err in errors[:10]:
-            chunks.append(f"• <b>{html.escape(label)}</b>\n<code>{html.escape(url)}</code>\n{html.escape(str(err))}")
-        await send_bot_message(chat_id, "❗ <b>Ошибки URL</b>\n\n" + "\n\n".join(chunks), parse_mode="HTML")
-
-    if not items_with_sources:
-        await send_screen(chat_id, user_id, "❗ Ничего не найдено по активным URL.", reply_markup=kb_main(user_id))
-        return
-
-    aggregated = {}
-    for item, source in items_with_sources:
-        key = make_item_key(item)
-        if key not in aggregated:
-            aggregated[key] = (item, source)
-
-    items_list = list(aggregated.values())[:10]
-    await send_screen(chat_id, user_id, f"✅ <b>Проверка лотов</b>\n• Показано: <b>{len(items_list)}</b>", reply_markup=kb_main(user_id), parse_mode="HTML")
-
-    for item, source in items_list:
-        await send_bot_message(chat_id, make_card(item, source["name"]), parse_mode="HTML", disable_web_page_preview=True)
-
-
-async def send_test_for_single_url(user_id: int, chat_id: int, src: dict):
-    url = src["url"]
-    label = src.get("name") or f"URL #{src.get('idx', '?')}"
-    items, err = await fetch_with_retry(url, max_retries=2)
-
-    if err:
-        await send_screen(chat_id, user_id, f"❗ Ошибка теста <b>{html.escape(label)}</b>\n{html.escape(str(err))}", reply_markup=kb_urls_menu(), parse_mode="HTML")
-        return
-    if not items:
-        await send_screen(chat_id, user_id, f"⚠️ <b>{html.escape(label)}</b>: пусто.", reply_markup=kb_urls_menu(), parse_mode="HTML")
-        return
-
-    aggregated = {}
-    for it in items:
-        aggregated.setdefault(make_item_key(it), it)
-
-    limited = list(aggregated.values())[:10]
-    await send_screen(
-        chat_id,
-        user_id,
-        f"✅ Тест: <b>{html.escape(label)}</b>\n• Уникальных: <b>{len(aggregated)}</b>\n• Показано: <b>{len(limited)}</b>",
-        reply_markup=kb_urls_menu(),
-        parse_mode="HTML",
-    )
-
-    for it in limited:
-        await send_bot_message(chat_id, make_card(it, label), parse_mode="HTML", disable_web_page_preview=True)
-
-
-async def seed_existing_without_notifications(user_id: int):
-    items_with_sources, _ = await fetch_all_sources(user_id)
-    aggregated = {}
-    for item, source in items_with_sources:
-        aggregated.setdefault(make_item_key(item), (item, source))
-
-    seen_batch = []
-    buy_batch = []
-    for item, _source in aggregated.values():
-        key = make_item_key(item)
-        if key not in user_seen_items[user_id]:
-            user_seen_items[user_id].add(key)
-            seen_batch.append(key)
-        if key not in user_buy_attempted[user_id]:
-            user_buy_attempted[user_id].add(key)
-            buy_batch.append(key)
-
-    await db_mark_seen_batch(user_id, seen_batch)
-    await db_mark_buy_attempted_batch(user_id, buy_batch)
+        bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
+        return bought, f"attempt=1/1 | {info}"
 
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
@@ -2235,6 +1801,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     user_buy_inflight[user_id].clear()
     ensure_notify_worker(user_id)
+    no_lots_streak = 0
     cycle_num = 0
     pending_autobuy_tasks: set[asyncio.Task] = set()
 
@@ -2297,8 +1864,21 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
                     break
 
-            if new_items_processed > 0:
-                await clear_no_lots_message(chat_id, user_id)
+            if new_items_processed == 0:
+                no_lots_streak += 1
+                ts = time.strftime("%H:%M:%S", time.localtime())
+                await upsert_no_lots_message(
+                    chat_id,
+                    user_id,
+                    (
+                        "ℹ️ <b>Новых лотов пока нет</b>\n"
+                        f"• Обновлено: <b>{ts}</b>\n"
+                        f"• Пустых циклов подряд: <b>{no_lots_streak}</b>"
+                    ),
+                )
+            else:
+                no_lots_streak = 0
+                reset_no_lots_message(user_id)
 
             await db_mark_seen_batch(user_id, seen_batch)
             await asyncio.sleep(await user_hunter_interval(user_id))
@@ -2360,6 +1940,18 @@ async def buttons_handler(message: types.Message):
 
     text = (message.text or "").strip()
     mode = user_modes[user_id]
+
+    def _btn_eq(*labels: str) -> bool:
+        if not text:
+            return False
+        normalized = re.sub(r"^[^0-9A-Za-zА-Яа-яЁё]+", "", text).strip().lower()
+        for label in labels:
+            if text == label:
+                return True
+            label_norm = re.sub(r"^[^0-9A-Za-zА-Яа-яЁё]+", "", label).strip().lower()
+            if normalized == label_norm:
+                return True
+        return False
 
     allowed = await db_is_allowed(user_id)
     if not allowed and user_id not in OWNER_IDS:
@@ -2599,7 +2191,7 @@ async def buttons_handler(message: types.Message):
             await send_compact_10_for_user(user_id, chat_id)
             return await safe_delete(message)
 
-        if text == "♻️ Сбросить историю":
+        if _btn_eq("♻️ Сбросить историю", "🍀 Сбросить историю", "Сбросить историю"):
             user_seen_items[user_id].clear()
             user_buy_attempted[user_id].clear()
             user_history_reset_pending[user_id] = True
@@ -2608,7 +2200,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "♻️ История сброшена. Следующий запуск охотника обработает все лоты как новые (включая автобай по URL, где он активен).", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
-        if text == "🚀 Старт охотника":
+        if _btn_eq("🚀 Старт охотника", "▶️ Старт охотника", "Старт охотника"):
             requested_mode = "classic"
             lock = get_user_hunter_start_lock(user_id)
             async with lock:
@@ -2631,7 +2223,6 @@ async def buttons_handler(message: types.Message):
                     log_autobuy(f"HUNTER_RESET_MODE user_id={user_id} mode={requested_mode} treat_all_as_new=1")
 
                 user_history_reset_pending[user_id] = False
-                await clear_no_lots_message(chat_id, user_id)
 
                 task = asyncio.create_task(hunter_loop_for_user(user_id, chat_id))
                 user_hunter_tasks[user_id] = task
@@ -2640,19 +2231,18 @@ async def buttons_handler(message: types.Message):
                 await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}\nИнтервал цикла: {HUNTER_INTERVAL_BASE:.2f} сек", reply_markup=kb_main(user_id))
                 return await safe_delete(message)
 
-        if text == "🛑 Стоп охотника":
+        if _btn_eq("🛑 Стоп охотника", "🔴 Стоп охотника", "Стоп охотника"):
             user_search_active[user_id] = False
             user_hunter_mode[user_id] = "off"
             task = user_hunter_tasks.get(user_id)
             if task:
                 task.cancel()
                 user_hunter_tasks.pop(user_id, None)
-            await clear_no_lots_message(chat_id, user_id)
             log_autobuy(f"HUNTER_STOP user_id={user_id}")
             await send_screen(chat_id, user_id, "🛑 Охотник остановлен.", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
-        if text == "📚 Мои URL":
+        if _btn_eq("📚 Мои URL", "Мои URL"):
             user_modes[user_id] = None
             user_page_state[user_id] = {"ctx": None, "page": 0}
             await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
