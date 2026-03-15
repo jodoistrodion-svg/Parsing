@@ -37,7 +37,7 @@ OWNER_IDS = {OWNER_ID}
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
 FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.70").strip())
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.14").strip())
+BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.32").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
 
@@ -65,15 +65,15 @@ USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "1").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
 AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").strip())
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.0").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.10").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "6").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0.90").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "10").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "1.60").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
 # ====================== LOGGING ======================
@@ -443,6 +443,7 @@ user_search_active = defaultdict(lambda: False)
 user_hunter_mode = defaultdict(lambda: "off")  # off/classic
 user_seen_items = defaultdict(set)
 user_buy_attempted = defaultdict(set)
+user_buy_inflight = defaultdict(set)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 user_hunter_start_locks: dict[int, asyncio.Lock] = {}
 user_history_reset_pending = defaultdict(lambda: False)
@@ -1627,6 +1628,14 @@ def _autobuy_classify_response(status: int, text: str):
     if status in (404, 405):
         return "retry", raw[:220], False
     if status in (200, 201, 202):
+        if any(marker in joined for marker in auth_error_markers):
+            return "auth", raw[:220], False
+        if "secret" in joined or "answer" in joined or "секрет" in joined:
+            return "secret", raw[:220], False
+        if any(marker in joined for marker in queue_markers):
+            return "queue", raw[:220], False
+        if any(marker in joined for marker in terminal_error_markers):
+            return "terminal", raw[:220], False
         return "success", raw[:220], False
     if status == 401:
         return "auth", raw[:220], False
@@ -1659,7 +1668,11 @@ def _sanitize_buy_info_for_user(info: str) -> str:
 def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
     if state in {"auth", "secret", "terminal", "success"}:
         return True
-    if status in (400, 401, 403):
+    if status == 401:
+        return True
+    if status == 403 and state in {"auth", "secret", "terminal"}:
+        return True
+    if status == 400 and (state in {"auth", "secret", "terminal"} or "invalid balance" in (info or "").lower()):
         return True
     low = (info or "").lower()
     if any(x in low for x in (
@@ -1668,6 +1681,18 @@ def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
     )):
         return True
     return False
+
+
+def _autobuy_should_mark_attempt(bought: bool, info: str) -> bool:
+    if bought:
+        return True
+    low = (info or "").lower()
+    terminal_markers = (
+        "недостаточно", "insufficient", "already sold", "already purchased", "already bought",
+        "уже продан", "нельзя купить", "секрет", "secret", "ошибка авторизации", "auth",
+        "аккаунт продан", "access denied", "forbidden", "unauthorized", "invalid balance",
+    )
+    return any(x in low for x in terminal_markers)
 
 
 async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
@@ -2168,8 +2193,22 @@ async def seed_existing_without_notifications(user_id: int):
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
     item_id = item.get("item_id") or item.get("id")
+    item_key = make_item_key(item)
     src_name = source.get("name") or "UNKNOWN"
-    bought, buy_info = await try_autobuy_item(source, item, found_perf=found_perf)
+    bought = False
+    buy_info = "autobuy_not_started"
+    should_mark_attempt = False
+    try:
+        bought, buy_info = await try_autobuy_item(source, item, found_perf=found_perf)
+        should_mark_attempt = _autobuy_should_mark_attempt(bought, str(buy_info))
+        user_buy_inflight[user_id].discard(item_key)
+        if should_mark_attempt and item_key not in user_buy_attempted[user_id]:
+            user_buy_attempted[user_id].add(item_key)
+            await db_mark_buy_attempted(user_id, item_key)
+    except Exception as e:
+        user_buy_inflight[user_id].discard(item_key)
+        buy_info = f"autobuy_runtime_error: {e}"
+        log_autobuy(f"BUY_MARK_ERR user_id={user_id} item_key={item_key} err='{_safe_compact(str(e),220)}'")
 
     if bought:
         dur_ms = int((time.perf_counter() - found_perf) * 1000)
@@ -2187,11 +2226,17 @@ async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item
             f"item_id=<code>{html.escape(str(item_id))}</code>\n{html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
         )
 
+    log_autobuy(
+        f"BUY_RESULT user_id={user_id} item_key={item_key} bought={int(bool(bought))} "
+        f"persist_attempt={int(bool(should_mark_attempt))} info='{_safe_compact(str(buy_info),240)}'"
+    )
+
     enqueue_hunter_notification(user_id, chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
+    user_buy_inflight[user_id].clear()
     ensure_notify_worker(user_id)
     no_lots_streak = 0
     cycle_num = 0
@@ -2215,7 +2260,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
         cycle_num += 1
         include_non_autobuy = NON_AUTOBUY_CYCLE_EVERY <= 1 or (cycle_num % NON_AUTOBUY_CYCLE_EVERY == 0)
         seen_batch = []
-        buy_attempt_batch = []
         new_items_processed = 0
         try:
             async for source, items, err in iter_sources_results_split(user_id, include_non_autobuy=include_non_autobuy):
@@ -2240,9 +2284,8 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     found_perf = time.perf_counter()
                     src_name = source.get("name") or "UNKNOWN"
 
-                    if source.get("autobuy", False) and key not in user_buy_attempted[user_id]:
-                        user_buy_attempted[user_id].add(key)
-                        buy_attempt_batch.append(key)
+                    if source.get("autobuy", False) and key not in user_buy_attempted[user_id] and key not in user_buy_inflight[user_id]:
+                        user_buy_inflight[user_id].add(key)
                         t = asyncio.create_task(_run_autobuy_and_notify(user_id, chat_id, source, item, found_perf))
                         _track_task(t)
 
@@ -2275,7 +2318,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                 reset_no_lots_message(user_id)
 
             await db_mark_seen_batch(user_id, seen_batch)
-            await db_mark_buy_attempted_batch(user_id, buy_attempt_batch)
             await asyncio.sleep(await user_hunter_interval(user_id))
 
         except asyncio.CancelledError:
@@ -2285,7 +2327,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             if seen_batch:
                 try:
                     await db_mark_seen_batch(user_id, seen_batch)
-                    await db_mark_buy_attempted_batch(user_id, buy_attempt_batch)
                 except Exception:
                     pass
             user_api_errors[user_id] += 1
@@ -2295,6 +2336,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
     if pending_autobuy_tasks:
         for task in list(pending_autobuy_tasks):
             task.cancel()
+    user_buy_inflight[user_id].clear()
 
 
 # ====================== HANDLERS ======================
