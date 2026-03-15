@@ -1621,8 +1621,6 @@ def _autobuy_classify_response(status: int, text: str):
     if status in (200, 201, 202):
         if any(marker in joined for marker in auth_error_markers):
             return "auth", raw[:220], False
-        if "secret" in joined or "answer" in joined or "секрет" in joined:
-            return "secret", raw[:220], False
         if any(marker in joined for marker in queue_markers):
             return "queue", raw[:220], False
         if any(marker in joined for marker in terminal_error_markers):
@@ -1635,8 +1633,6 @@ def _autobuy_classify_response(status: int, text: str):
     if status == 400 and any(x in joined for x in ("invalid json", "unsupported media", "content-type")):
         return "retry", raw[:220], True
 
-    if "secret" in joined or "answer" in joined or "секрет" in joined:
-        return "secret", raw[:220], False
     if any(marker in joined for marker in queue_markers):
         return "queue", raw[:220], False
     if any(marker in joined for marker in success_markers):
@@ -1657,13 +1653,13 @@ def _sanitize_buy_info_for_user(info: str) -> str:
 
 
 def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
-    if state in {"auth", "secret", "terminal", "success"}:
+    if state in {"auth", "terminal", "success"}:
         return True
     if status == 401:
         return True
-    if status == 403 and state in {"auth", "secret", "terminal"}:
+    if status == 403 and state in {"auth", "terminal"}:
         return True
-    if status == 400 and (state in {"auth", "secret", "terminal"} or "invalid balance" in (info or "").lower()):
+    if status == 400 and (state in {"auth", "terminal"} or "invalid balance" in (info or "").lower()):
         return True
     low = (info or "").lower()
     if any(x in low for x in (
@@ -1680,10 +1676,28 @@ def _autobuy_should_mark_attempt(bought: bool, info: str) -> bool:
     low = (info or "").lower()
     terminal_markers = (
         "недостаточно", "insufficient", "already sold", "already purchased", "already bought",
-        "уже продан", "нельзя купить", "секрет", "secret", "ошибка авторизации", "auth",
+        "уже продан", "нельзя купить", "ошибка авторизации", "auth",
         "аккаунт продан", "access denied", "forbidden", "unauthorized", "invalid balance",
     )
     return any(x in low for x in terminal_markers)
+
+
+def _normalize_command_text(text: str) -> str:
+    raw = (text or "").strip().lower()
+    if not raw:
+        return ""
+
+    if raw in {"/start", "start", "старт", "начать"}:
+        return "start"
+    if raw in {"/menu", "menu", "меню", "главное меню"}:
+        return "menu"
+    if raw in {"/status", "status", "статус"}:
+        return "status"
+    if raw in {"/hunter_start", "hunter_start", "start hunter", "старт охотника", "запуск охотника"}:
+        return "hunter_start"
+    if raw in {"/hunter_stop", "hunter_stop", "stop hunter", "стоп охотника", "остановить охотника"}:
+        return "hunter_stop"
+    return ""
 
 
 async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
@@ -1961,7 +1975,19 @@ async def buttons_handler(message: types.Message):
     await load_user_data(user_id)
 
     text = (message.text or "").strip()
+    norm_cmd = _normalize_command_text(text)
     mode = user_modes[user_id]
+
+    if norm_cmd == "start":
+        await send_welcome_sticker(chat_id)
+        await send_bot_message(chat_id, START_MSG_1, disable_web_page_preview=True)
+        allowed = await db_is_allowed(user_id)
+        if allowed:
+            await send_screen(chat_id, user_id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True)
+        else:
+            await send_bot_message(chat_id, START_MSG_2, disable_web_page_preview=True)
+            await show_denied(user_id, chat_id)
+        return await safe_delete(message)
 
     allowed = await db_is_allowed(user_id)
     if not allowed and user_id not in OWNER_IDS:
@@ -2193,8 +2219,12 @@ async def buttons_handler(message: types.Message):
             )
             return await safe_delete(message)
 
-        if text == "📊 Статус":
+        if text == "📊 Статус" or norm_cmd == "status":
             await show_status(user_id, chat_id)
+            return await safe_delete(message)
+
+        if norm_cmd == "menu":
+            await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
         if text == "✨ Проверка лотов":
@@ -2210,7 +2240,7 @@ async def buttons_handler(message: types.Message):
             await send_screen(chat_id, user_id, "♻️ История сброшена. Следующий запуск охотника обработает все лоты как новые (включая автобай по URL, где он активен).", reply_markup=kb_main(user_id))
             return await safe_delete(message)
 
-        if text == "🚀 Старт охотника":
+        if text == "🚀 Старт охотника" or norm_cmd == "hunter_start":
             requested_mode = "classic"
             lock = get_user_hunter_start_lock(user_id)
             async with lock:
@@ -2241,7 +2271,7 @@ async def buttons_handler(message: types.Message):
                 await send_screen(chat_id, user_id, f"🚀 Охотник запущен! Активных URL: {len(active_sources)}\nИнтервал цикла: {HUNTER_INTERVAL_BASE:.2f} сек", reply_markup=kb_main(user_id))
                 return await safe_delete(message)
 
-        if text == "🛑 Стоп охотника":
+        if text == "🛑 Стоп охотника" or norm_cmd == "hunter_stop":
             user_search_active[user_id] = False
             user_hunter_mode[user_id] = "off"
             task = user_hunter_tasks.get(user_id)
