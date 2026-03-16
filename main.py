@@ -628,6 +628,76 @@ def build_users_picker_kb(users: list[tuple[int, int, str]], page: int) -> Reply
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
+async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
+    sources = await get_all_sources(user_id, enabled_only=False)
+    if not sources:
+        user_modes[user_id] = None
+        user_page_state[user_id] = {"ctx": None, "page": 0}
+        await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+        return
+
+    total_pages = (len(sources) + URL_PAGE_SIZE - 1) // URL_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    user_modes[user_id] = "pick_list"
+    user_page_state[user_id] = {"ctx": "pick_list", "page": page}
+
+    enabled_count = sum(1 for s in sources if s.get("enabled", True))
+    autobuy_count = sum(1 for s in sources if s.get("autobuy", False))
+    title = (
+        f"📄 Список URL ({len(sources)})\n"
+        f"• Активных: {enabled_count}\n"
+        f"• С автобаем: {autobuy_count}\n"
+        "Нажми на URL для деталей."
+    )
+    await send_screen(chat_id, user_id, title, reply_markup=build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад"))
+
+
+async def show_users_screen(user_id: int, chat_id: int, page: int = 0):
+    users = await db_list_users(USER_PAGE_SIZE, max(page, 0) * USER_PAGE_SIZE)
+    total = await db_count_users()
+
+    if total <= 0:
+        user_modes[user_id] = None
+        user_page_state[user_id] = {"ctx": None, "page": 0}
+        await send_screen(chat_id, user_id, "👥 Пользователей пока нет.", reply_markup=kb_main(user_id))
+        return
+
+    total_pages = (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    users = await db_list_users(USER_PAGE_SIZE, page * USER_PAGE_SIZE)
+
+    user_modes[user_id] = "users_pick"
+    user_page_state[user_id] = {"ctx": "users_pick", "page": page}
+
+    allowed_count = sum(1 for _uid, allowed, _role in users if allowed)
+    text = (
+        f"👥 Пользователи: {total}\n"
+        f"• На странице: {len(users)}\n"
+        f"• Разрешено на странице: {allowed_count}\n"
+        "Нажми на пользователя, чтобы переключить доступ."
+    )
+    await send_screen(chat_id, user_id, text, reply_markup=build_users_picker_kb(users, page=page))
+
+
+async def show_status(user_id: int, chat_id: int):
+    sources = await get_all_sources(user_id, enabled_only=False)
+    active_sources = sum(1 for s in sources if s.get("enabled", True))
+    autobuy_sources = sum(1 for s in sources if s.get("autobuy", False))
+    hunter_state = "🟢 Запущен" if user_hunter_mode.get(user_id) == "classic" and user_search_active.get(user_id) else "🔴 Остановлен"
+    balance_text = await get_account_buy_balance_text()
+
+    text = (
+        "📊 Статус\n\n"
+        f"• Охотник: {hunter_state}\n"
+        f"• URL: {len(sources)} (активных: {active_sources})\n"
+        f"• Автобай URL: {autobuy_sources}\n"
+        f"• Ошибки API: {user_api_errors.get(user_id, 0)}\n"
+        f"• Баланс (accounts): {balance_text}"
+    )
+    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id))
+
+
 def parse_user_id_from_button(text: str) -> int | None:
     m = re.search(r"(\d{5,})", text or "")
     if not m:
