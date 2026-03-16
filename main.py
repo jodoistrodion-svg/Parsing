@@ -1818,19 +1818,33 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     session = await get_session()
     common_headers = _default_api_headers()
     headers_json = {**common_headers, "Content-Type": "application/json"}
+    headers_form = {**common_headers, "Content-Type": "application/x-www-form-urlencoded"}
 
     async def _post_buy(idx: int, buy_url: str):
         try:
             bucket, min_interval = _api_limit_bucket("POST", buy_url)
+
             await request_rate_limiter.wait(bucket, min_interval)
             async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
                 body = await resp.text()
-                state, info, _ = _autobuy_classify_response(resp.status, body)
+                state, info, force_form = _autobuy_classify_response(resp.status, body)
                 log_autobuy(
                     f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
-                    f"status={resp.status} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                    f"status={resp.status} state={state} mode=json url={buy_url} info='{_safe_compact(info,220)}'"
                 )
-                return idx, buy_url, resp.status, state, info
+
+            if force_form:
+                await request_rate_limiter.wait(bucket, min_interval)
+                async with session.post(buy_url, headers=headers_form, data=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp_form:
+                    body_form = await resp_form.text()
+                    state_form, info_form, _ = _autobuy_classify_response(resp_form.status, body_form)
+                    log_autobuy(
+                        f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
+                        f"status={resp_form.status} state={state_form} mode=form url={buy_url} info='{_safe_compact(info_form,220)}'"
+                    )
+                    return idx, buy_url, resp_form.status, state_form, info_form
+
+            return idx, buy_url, resp.status, state, info
         except asyncio.TimeoutError:
             return idx, buy_url, 0, "timeout", "buy_timeout"
         except Exception as e:
