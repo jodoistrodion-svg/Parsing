@@ -93,7 +93,7 @@ AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").
 AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "10").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
-AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "3").strip())
+AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "0").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
