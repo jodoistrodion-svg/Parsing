@@ -82,7 +82,7 @@ USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "5").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
 AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
 AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.12").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.06").strip())
@@ -1982,36 +1982,33 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
     lock = get_buy_lock(item_key)
 
     async with lock:
-        attempts = max(1, AUTOBUY_RETRY_ATTEMPTS)
+        attempts_limit = AUTOBUY_RETRY_ATTEMPTS if AUTOBUY_RETRY_ATTEMPTS > 0 else None
         last_info = "autobuy_no_attempts"
 
-        for i in range(1, attempts + 1):
-            remaining_window = _remaining_autobuy_window_sec(found_perf)
-            if remaining_window is not None and remaining_window <= 0:
-                return False, f"attempt={i-1}/{attempts} | autobuy_total_window_exceeded"
+        i = 0
+        while True:
+            i += 1
+            max_attempt_window = _remaining_autobuy_window_sec(found_perf)
+            if max_attempt_window is not None and max_attempt_window <= 0:
+                max_attempt_window = None
 
-            max_attempt_window = remaining_window if remaining_window is not None else None
             bought, info = await _try_autobuy_once(source, item, found_perf=found_perf, max_duration_override=max_attempt_window)
             last_info = str(info)
             if bought:
-                return True, f"attempt={i}/{attempts} | {info}"
+                total = attempts_limit if attempts_limit is not None else "∞"
+                return True, f"attempt={i}/{total} | {info}"
 
             if not _autobuy_should_retry_by_info(last_info):
-                return False, f"attempt={i}/{attempts} | {info}"
+                total = attempts_limit if attempts_limit is not None else "∞"
+                return False, f"attempt={i}/{total} | {info}"
 
-            if i < attempts:
-                is_queue = "queue" in last_info.lower()
-                delay = _autobuy_retry_delay(is_queue=is_queue)
-                if delay > 0:
-                    remaining_window = _remaining_autobuy_window_sec(found_perf)
-                    if remaining_window is not None and remaining_window <= 0:
-                        return False, f"attempt={i}/{attempts} | autobuy_total_window_exceeded"
-                    if remaining_window is not None:
-                        delay = min(delay, max(0.0, remaining_window))
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+            if attempts_limit is not None and i >= attempts_limit:
+                return False, f"attempt={i}/{attempts_limit} | {last_info}"
 
-        return False, f"attempt={attempts}/{attempts} | {last_info}"
+            is_queue = "queue" in last_info.lower()
+            delay = _autobuy_retry_delay(is_queue=is_queue)
+            if delay > 0:
+                await asyncio.sleep(delay)
 
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
@@ -2587,7 +2584,13 @@ async def buttons_handler(message: types.Message):
 
     except Exception as e:
         try:
-            await send_bot_message(chat_id, f"❌ Ошибка: {html.escape(str(e))}", parse_mode="HTML")
+            await send_screen(
+                chat_id,
+                user_id,
+                f"❌ Ошибка: {html.escape(str(e))}\n\nПанель восстановлена — попробуй ещё раз.",
+                reply_markup=kb_main(user_id),
+                parse_mode="HTML",
+            )
         except Exception:
             pass
         await safe_delete(message)
