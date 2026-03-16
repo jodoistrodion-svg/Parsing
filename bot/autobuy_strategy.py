@@ -64,8 +64,10 @@ def build_buy_urls(source_url: str, item_id: int) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
     for path_list in (fast_paths, medium_paths, fallback_paths):
-        for base in dedup_bases:
-            for tpl in path_list:
+        # Важен порядок: сначала одинаковый path по всем хостам,
+        # чтобы в первой волне параллельных запросов покрыть максимум API.
+        for tpl in path_list:
+            for base in dedup_bases:
                 url = f"{base}/{tpl.format(id=item_id)}"
                 if url in seen:
                     continue
