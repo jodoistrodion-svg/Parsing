@@ -31,8 +31,23 @@ user_balance_cache = defaultdict(lambda: {"text": "—", "ts": 0})
 BALANCE_CACHE_TTL = 60
 
 # ====================== OWNER / ACCESS ======================
-OWNER_ID = 1377985336
-OWNER_IDS = {OWNER_ID}
+def _parse_int_list(raw: str) -> set[int]:
+    result: set[int] = set()
+    for chunk in (raw or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            result.add(int(chunk))
+        except ValueError:
+            continue
+    return result
+
+
+OWNER_ID = int((os.getenv("OWNER_ID") or "1377985336").strip())
+OWNER_IDS = _parse_int_list(os.getenv("OWNER_IDS") or "") or {OWNER_ID}
+ACCESS_MODE = (os.getenv("ACCESS_MODE") or "open").strip().lower()
+ACCESS_OPEN = ACCESS_MODE in {"open", "all", "public", "0"}
 
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
@@ -740,7 +755,7 @@ async def init_db():
 async def db_ensure_user(user_id: int):
     await db_execute(
         "INSERT OR IGNORE INTO users(user_id, role, allowed, last_error_report, last_request_ts) VALUES (?, ?, ?, ?, ?)",
-        (user_id, "unknown", 1 if user_id in OWNER_IDS else 0, 0, 0),
+        (user_id, "unknown", 1 if (ACCESS_OPEN or user_id in OWNER_IDS) else 0, 0, 0),
         commit=True,
     )
     if user_id in OWNER_IDS:
@@ -748,7 +763,7 @@ async def db_ensure_user(user_id: int):
 
 
 async def db_is_allowed(user_id: int) -> bool:
-    if user_id in OWNER_IDS:
+    if ACCESS_OPEN or user_id in OWNER_IDS:
         return True
     row = await db_fetchone("SELECT allowed FROM users WHERE user_id=?", (user_id,))
     return bool(row[0]) if row else False
