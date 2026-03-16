@@ -53,7 +53,7 @@ ACCESS_OPEN = ACCESS_MODE in {"open", "all", "public", "0"}
 
 # ====================== НАСТРОЙКИ ======================
 HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "0.70").strip())
+FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "1.20").strip())
 BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.32").strip())
 RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
 RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
@@ -82,18 +82,19 @@ USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.0").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.0").strip())
-AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.0").strip())
-AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.0").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.70").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "5").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.12").strip())
+AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.06").strip())
+AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.18").strip())
+FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "0").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
-AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "10").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "0").strip())
+AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "24").strip())
+AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "2.8").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
-AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "0").strip())
+AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "24").strip())
+USER_ACTION_FETCH_TIMEOUT = float((os.getenv("USER_ACTION_FETCH_TIMEOUT") or "2.4").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -167,12 +168,14 @@ START_MSG_1 = (
 )
 
 START_MSG_2 = (
-    "🧭 Главное меню\n\n"
-    "• ✨ Проверка лотов — быстрый просмотр до 10 свежих карточек\n"
-    "• 📚 Мои URL — управление источниками, тестом и автобаем\n"
-    "• 📊 Статус — сводка по работе, балансу и ошибкам API\n"
-    "• 🚀 Старт охотника — непрерывный мониторинг новых лотов\n"
-    "• ♻️ Сбросить историю — считать все лоты снова новыми"
+    "🧭 <b>Главное меню</b>\n"
+    "╭────────────────────╮\n"
+    "│ ✨ Проверка лотов — до 10 свежих карточек\n"
+    "│ 📚 Мои URL — источники, тест, автобай\n"
+    "│ 📊 Статус — охотник, баланс, API-ошибки\n"
+    "│ 🚀 Старт охотника — непрерывный мониторинг\n"
+    "│ ♻️ Сбросить историю — считать все лоты новыми\n"
+    "╰────────────────────╯"
 )
 
 WELCOME_STICKERS = [
@@ -648,12 +651,13 @@ async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
     enabled_count = sum(1 for s in sources if s.get("enabled", True))
     autobuy_count = sum(1 for s in sources if s.get("autobuy", False))
     title = (
-        f"📄 Список URL ({len(sources)})\n"
-        f"• Активных: {enabled_count}\n"
-        f"• С автобаем: {autobuy_count}\n"
-        "Нажми на URL для деталей."
+        f"📄 <b>Список URL</b> · всего: <b>{len(sources)}</b>\n"
+        f"├ 🟢 Активных: <b>{enabled_count}</b>\n"
+        f"├ 🛒 С автобаем: <b>{autobuy_count}</b>\n"
+        f"└ 📑 Страница: <b>{page + 1}/{total_pages}</b>\n\n"
+        "Нажми на нужный URL, чтобы открыть детали."
     )
-    await send_screen(chat_id, user_id, title, reply_markup=build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад"))
+    await send_screen(chat_id, user_id, title, reply_markup=build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад"), parse_mode="HTML")
 
 
 async def show_users_screen(user_id: int, chat_id: int, page: int = 0):
@@ -1206,13 +1210,14 @@ async def close_session():
         _global_session = None
 
 
-async def fetch_items_raw(url: str):
+async def fetch_items_raw(url: str, request_timeout: float | None = None):
     bucket, min_interval = _api_limit_bucket("GET", url)
     await request_rate_limiter.wait(bucket, min_interval)
     headers = _default_api_headers()
+    timeout_value = max(0.2, float(request_timeout if request_timeout is not None else FETCH_TIMEOUT))
     try:
         session = await get_session()
-        async with session.get(url, headers=headers, timeout=FETCH_TIMEOUT) as resp:
+        async with session.get(url, headers=headers, timeout=timeout_value) as resp:
             text = await resp.text()
 
             if resp.status in (400, 401, 403, 404):
@@ -1237,7 +1242,7 @@ async def fetch_items_raw(url: str):
         return None, f"❌ Ошибка: {e}", 0
 
 
-async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
+async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX, request_timeout: float | None = None):
     attempt = 0
     delay = RETRY_BASE_DELAY
 
@@ -1245,7 +1250,7 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX):
         attempt += 1
         try:
             async with semaphore:
-                items, err, status = await fetch_items_raw(url)
+                items, err, status = await fetch_items_raw(url, request_timeout=request_timeout)
         except Exception as e:
             items, err, status = None, f"❌ Ошибка: {e}", 0
 
@@ -1685,6 +1690,27 @@ def _sanitize_buy_info_for_user(info: str) -> str:
     return s
 
 
+def _autobuy_retry_delay(is_queue: bool) -> float:
+    if is_queue:
+        low = max(0.0, AUTOBUY_QUEUE_RETRY_MIN_DELAY)
+        high = max(low, AUTOBUY_QUEUE_RETRY_MAX_DELAY)
+    else:
+        low = max(0.0, AUTOBUY_RETRY_MIN_DELAY)
+        high = max(low, AUTOBUY_RETRY_MAX_DELAY)
+    return random.uniform(low, high) if high > 0 else 0.0
+
+
+def _autobuy_should_retry_by_info(info: str) -> bool:
+    low = (info or "").lower()
+    if any(x in low for x in (
+        "ошибка авторизации", "authorization", "unauthorized", "forbidden", "access denied",
+        "недостаточно", "insufficient", "already sold", "already bought", "already purchased",
+        "уже продан", "нельзя купить", "ручная проверка", "secret",
+    )):
+        return False
+    return True
+
+
 def _extract_item_price(item: dict):
     for key in ("price", "amount", "sum", "cost"):
         val = item.get(key)
@@ -1834,7 +1860,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                 )
 
             if force_form:
-                await request_rate_limiter.wait(bucket, min_interval)
+                # Фолбэк формой запускаем сразу, без дополнительной паузы,
+                # чтобы не терять драгоценные миллисекунды на hot-path автобая.
                 async with session.post(buy_url, headers=headers_form, data=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp_form:
                     body_form = await resp_form.text()
                     state_form, info_form, _ = _autobuy_classify_response(resp_form.status, body_form)
@@ -1942,8 +1969,25 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
     lock = get_buy_lock(item_key)
 
     async with lock:
-        bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
-        return bought, f"attempt=1/1 | {info}"
+        attempts = max(1, AUTOBUY_RETRY_ATTEMPTS)
+        last_info = "autobuy_no_attempts"
+
+        for i in range(1, attempts + 1):
+            bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
+            last_info = str(info)
+            if bought:
+                return True, f"attempt={i}/{attempts} | {info}"
+
+            if not _autobuy_should_retry_by_info(last_info):
+                return False, f"attempt={i}/{attempts} | {info}"
+
+            if i < attempts:
+                is_queue = "queue" in last_info.lower()
+                delay = _autobuy_retry_delay(is_queue=is_queue)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+        return False, f"attempt={attempts}/{attempts} | {last_info}"
 
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
@@ -2108,9 +2152,9 @@ async def start_cmd(message: types.Message):
     allowed = await db_is_allowed(user_id)
 
     if allowed:
-        await send_bot_message(message.chat.id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True)
+        await send_bot_message(message.chat.id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True, parse_mode="HTML")
     else:
-        await send_bot_message(message.chat.id, START_MSG_2, disable_web_page_preview=True)
+        await send_bot_message(message.chat.id, START_MSG_2, disable_web_page_preview=True, parse_mode="HTML")
         await show_denied(user_id, message.chat.id)
 
     user_last_screen_msg_id[user_id] = None
@@ -2142,9 +2186,9 @@ async def buttons_handler(message: types.Message):
         await send_bot_message(chat_id, START_MSG_1, disable_web_page_preview=True)
         allowed = await db_is_allowed(user_id)
         if allowed:
-            await send_screen(chat_id, user_id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True)
+            await send_screen(chat_id, user_id, START_MSG_2, reply_markup=kb_main(user_id), disable_web_page_preview=True, parse_mode="HTML")
         else:
-            await send_bot_message(chat_id, START_MSG_2, disable_web_page_preview=True)
+            await send_bot_message(chat_id, START_MSG_2, disable_web_page_preview=True, parse_mode="HTML")
             await show_denied(user_id, chat_id)
         return await safe_delete(message)
 
@@ -2210,7 +2254,7 @@ async def buttons_handler(message: types.Message):
             if text == "⬅️ Назад":
                 user_modes[user_id] = None
                 user_page_state[user_id] = {"ctx": None, "page": 0}
-                await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
+                await send_screen(chat_id, user_id, "🧭 <b>Главное меню</b>", reply_markup=kb_main(user_id), parse_mode="HTML")
                 return await safe_delete(message)
 
             target_uid = parse_user_id_from_button(text)
@@ -2245,9 +2289,9 @@ async def buttons_handler(message: types.Message):
                 await send_screen(chat_id, user_id, f"❌ Достигнут лимит URL: {limit}", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
-            _items, api_err = await fetch_with_retry(url, max_retries=2)
+            _items, api_err = await fetch_with_retry(url, max_retries=4, request_timeout=max(FETCH_TIMEOUT, USER_ACTION_FETCH_TIMEOUT))
             if api_err:
-                await send_screen(chat_id, user_id, f"❌ API ошибка: {api_err}", reply_markup=kb_urls_menu())
+                await send_screen(chat_id, user_id, f"❌ Не удалось проверить URL через API.\nПричина: {api_err}\n\nПопробуй ещё раз — теперь бот делает больше ретраев и ждёт ответ дольше.", reply_markup=kb_urls_menu())
                 return await safe_delete(message)
 
             user_pending_url[user_id] = url
@@ -2288,7 +2332,7 @@ async def buttons_handler(message: types.Message):
             if text == "⬅️ Назад":
                 user_modes[user_id] = None
                 user_page_state[user_id] = {"ctx": None, "page": 0}
-                await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
+                await send_screen(chat_id, user_id, "📚 <b>Меню URL</b>\nВыбери действие кнопками ниже.", reply_markup=kb_urls_menu(), parse_mode="HTML")
                 return await safe_delete(message)
 
             idx = parse_index_from_button(text)
@@ -2383,7 +2427,7 @@ async def buttons_handler(message: types.Message):
             return await safe_delete(message)
 
         if norm_cmd == "menu":
-            await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
+            await send_screen(chat_id, user_id, "🧭 <b>Главное меню</b>", reply_markup=kb_main(user_id), parse_mode="HTML")
             return await safe_delete(message)
 
         if text == "✨ Проверка лотов":
@@ -2444,13 +2488,13 @@ async def buttons_handler(message: types.Message):
         if text == "📚 Мои URL":
             user_modes[user_id] = None
             user_page_state[user_id] = {"ctx": None, "page": 0}
-            await send_screen(chat_id, user_id, "📚 Меню URL", reply_markup=kb_urls_menu())
+            await send_screen(chat_id, user_id, "📚 <b>Меню URL</b>\nВыбери действие кнопками ниже.", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
         if text == "⬅️ Назад":
             user_modes[user_id] = None
             user_page_state[user_id] = {"ctx": None, "page": 0}
-            await send_screen(chat_id, user_id, "🧭 Меню", reply_markup=kb_main(user_id))
+            await send_screen(chat_id, user_id, "🧭 <b>Главное меню</b>", reply_markup=kb_main(user_id), parse_mode="HTML")
             return await safe_delete(message)
 
         if text == "📄 Список URL":
@@ -2460,7 +2504,7 @@ async def buttons_handler(message: types.Message):
         if text == "➕ Добавить URL":
             user_modes[user_id] = "add_url_url"
             user_page_state[user_id] = {"ctx": None, "page": 0}
-            await send_screen(chat_id, user_id, "Вставь API URL (prod-api.lzt.market / api.lzt.market / api.lolz.live):", reply_markup=kb_urls_menu())
+            await send_screen(chat_id, user_id, "➕ <b>Добавление источника</b>\nВставь API URL:\n<code>prod-api.lzt.market</code> / <code>api.lzt.market</code> / <code>api.lolz.live</code>", reply_markup=kb_urls_menu(), parse_mode="HTML")
             return await safe_delete(message)
 
         if text == "🛒 Автобай URL":
