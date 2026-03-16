@@ -1,10 +1,26 @@
 import os
 
-API_TOKEN = (os.getenv("8728408716:AAEzZeaxGYj7BZdWKP2bXrCoQAneAI73p2Q") or "8728408716:AAEzZeaxGYj7BZdWKP2bXrCoQAneAI73p2Q").strip()
-LZT_API_KEY = (os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MzY4MzIwMiwianRpIjoiOTQ2NzM5Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MzEzNjMyMDJ9.qvrpUlO_IHNutTpYDAOAF_hQam7fDHOHeV7-eO3RdEsazWDNwbSQw8SX6PJaxHlMuQY0lQheTZG2b2MQssNGF7yeHSfWJxndtpxpKBz4xSrZ2gXpEd9AJ2-_Lpi6N8Acb3GIaWKsmC7V-DIUC7s1VfmqkWcU9KH_UKZ8EWPl1wk") or "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MzY4MzIwMiwianRpIjoiOTQ2NzM5Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MzEzNjMyMDJ9.qvrpUlO_IHNutTpYDAOAF_hQam7fDHOHeV7-eO3RdEsazWDNwbSQw8SX6PJaxHlMuQY0lQheTZG2b2MQssNGF7yeHSfWJxndtpxpKBz4xSrZ2gXpEd9AJ2-_Lpi6N8Acb3GIaWKsmC7V-DIUC7s1VfmqkWcU9KH_UKZ8EWPl1wk").strip()
+
+def _read_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value.strip()
+    return default.strip()
+
+
+# Telegram bot token. Supported env names for compatibility:
+# - API_TOKEN (project default)
+# - TELEGRAM_BOT_TOKEN / BOT_TOKEN (common aliases)
+API_TOKEN = _read_env("API_TOKEN", "TELEGRAM_BOT_TOKEN", "BOT_TOKEN")
+
+# LZT market API token. Supported env names for compatibility:
+# - LZT_API_KEY (project default)
+# - LZT_TOKEN / LOLZ_API_KEY (common aliases)
+LZT_API_KEY = _read_env("LZT_API_KEY", "LZT_TOKEN", "LOLZ_API_KEY")
 
 # URL категории miHoYo
-LZT_URL = (os.getenv("LZT_URL") or "https://api.lzt.market/category/mihoyo?sort_by=date&order=desc").strip()
+LZT_URL = _read_env("LZT_URL", default="https://api.lzt.market/category/mihoyo?sort_by=date&order=desc")
 
 # Интервал проверки новых лотов (в секундах)
-CHECK_INTERVAL = int((os.getenv("CHECK_INTERVAL") or "5").strip())
+CHECK_INTERVAL = int(_read_env("CHECK_INTERVAL", default="5"))
