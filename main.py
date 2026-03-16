@@ -147,6 +147,12 @@ def log_autobuy(line: str):
         pass
 
 
+async def error_reporter_loop():
+    """Background stub: keeps scheduler hook alive without crashing startup."""
+    while True:
+        await asyncio.sleep(ERROR_REPORT_INTERVAL)
+
+
 # ====================== START MESSAGES ======================
 START_MSG_1 = (
     "🤖 Parsing Bot 🤖\n"
@@ -2413,8 +2419,11 @@ async def main():
     finally:
         await close_session()
         await db_close()
-        if bot is not None and getattr(bot, "session", None) is not None and not bot.session.closed:
-            await bot.session.close()
+        if bot is not None and getattr(bot, "session", None) is not None:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
