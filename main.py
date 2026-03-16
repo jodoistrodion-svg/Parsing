@@ -19,6 +19,11 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramF
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
 from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
 from bot.ui import render_status_card
+from utils.logger import logger
+from utils.cache import TTLCache
+from parser.parser import parse_urls_concurrent
+from database.db import apply_sqlite_pragmas
+from services.http_client import build_connector, default_headers
 
 # ====================== ENV ======================
 API_TOKEN = os.getenv("API_TOKEN") or _API_TOKEN
@@ -101,6 +106,9 @@ USER_ACTION_FETCH_TIMEOUT = float((os.getenv("USER_ACTION_FETCH_TIMEOUT") or "2.
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
 LOG_MAX_BYTES = 15 * 1024 * 1024
 LOG_ROTATE_KEEP = 2
+PARSE_RESPONSE_CACHE_TTL = float((os.getenv("PARSE_RESPONSE_CACHE_TTL") or "0.25").strip())
+SEND_LOT_NOTIFICATIONS = (os.getenv("SEND_LOT_NOTIFICATIONS") or "0").strip().lower() in {"1","true","yes","on"}
+parse_response_cache = TTLCache(ttl_sec=PARSE_RESPONSE_CACHE_TTL, max_size=10000)
 
 
 def _ts_str() -> str:
@@ -145,12 +153,7 @@ def _rotate_log_if_needed():
 
 
 def log_autobuy(line: str):
-    try:
-        _rotate_log_if_needed()
-        with open(AUTOBUY_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{_ts_str()}] {line}\n")
-    except Exception:
-        pass
+    logger.info("%s", line)
 
 
 async def error_reporter_loop():
@@ -702,6 +705,8 @@ async def show_status(user_id: int, chat_id: int):
         hunter_state=hunter_state,
         api_errors=user_api_errors.get(user_id, 0),
         balance_text=balance_text,
+        notify_mode="Все лоты" if SEND_LOT_NOTIFICATIONS else "Только покупки",
+        cache_mode=f"TTL {PARSE_RESPONSE_CACHE_TTL:.2f}s",
     )
     await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id), parse_mode="HTML")
 
@@ -725,9 +730,7 @@ async def db_conn() -> aiosqlite.Connection:
     global _db
     if _db is None:
         _db = await aiosqlite.connect(DB_FILE)
-        await _db.execute("PRAGMA journal_mode=WAL")
-        await _db.execute("PRAGMA synchronous=NORMAL")
-        await _db.execute("PRAGMA foreign_keys=ON")
+        await apply_sqlite_pragmas(_db)
     return _db
 
 
@@ -835,6 +838,9 @@ async def init_db():
         "CREATE INDEX IF NOT EXISTS idx_urls_user_added ON urls(user_id, added_at, url)",
         commit=True,
     )
+
+    await db_execute("CREATE INDEX IF NOT EXISTS idx_seen_user_time ON seen(user_id, seen_at)", commit=True)
+    await db_execute("CREATE INDEX IF NOT EXISTS idx_buy_attempted_user_time ON buy_attempted(user_id, attempted_at)", commit=True)
 
 
 async def db_ensure_user(user_id: int):
@@ -1185,21 +1191,14 @@ def _api_limit_bucket(method: str, url: str) -> tuple[str, float]:
 
 
 def _default_api_headers() -> dict[str, str]:
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (compatible; ParsingBot/1.0; +https://api.lzt.market/)",
-        "Referer": "https://zelenka.guru/",
-    }
-    if LZT_API_KEY:
-        headers["Authorization"] = f"Bearer {LZT_API_KEY}"
-    return headers
+    return default_headers(LZT_API_KEY)
 
 
 async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT, connect=3, sock_connect=3, sock_read=FETCH_TIMEOUT)
-        connector = aiohttp.TCPConnector(limit=256, limit_per_host=128, ttl_dns_cache=300, enable_cleanup_closed=True)
+        connector = build_connector()
         _global_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _global_session
 
@@ -1212,6 +1211,11 @@ async def close_session():
 
 
 async def fetch_items_raw(url: str, request_timeout: float | None = None):
+    cache_key = f"raw::{url}"
+    cached = await parse_response_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     bucket, min_interval = _api_limit_bucket("GET", url)
     await request_rate_limiter.wait(bucket, min_interval)
     headers = _default_api_headers()
@@ -1233,7 +1237,9 @@ async def fetch_items_raw(url: str, request_timeout: float | None = None):
             if not isinstance(items, list):
                 return None, "⚠ API не вернул список items", resp.status
 
-            return items, None, resp.status
+            result = (items, None, resp.status)
+            await parse_response_cache.set(cache_key, result)
+            return result
 
     except asyncio.TimeoutError:
         return None, "❌ Таймаут запроса", 0
@@ -1413,8 +1419,7 @@ async def fetch_all_sources(user_id: int):
     # Для минимальной задержки автобая сначала запускаем опрос URL с включённым автобаем.
     sources.sort(key=lambda s: (not bool(s.get("autobuy", False)), s.get("idx", 0)))
 
-    tasks = [asyncio.create_task(_fetch_source_items(s)) for s in sources]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = await parse_urls_concurrent(sources, _fetch_source_items)
 
     items_with_sources = []
     errors = []
@@ -2116,10 +2121,11 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     seen_batch.append(key)
                     new_items_processed += 1
 
-                    try:
-                        await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
-                    except Exception as e:
-                        log_autobuy(f"LOT_NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
+                    if SEND_LOT_NOTIFICATIONS:
+                        try:
+                            await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                        except Exception as e:
+                            log_autobuy(f"LOT_NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
 
                 if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
                     break
@@ -2589,7 +2595,7 @@ async def buttons_handler(message: types.Message):
 # ====================== RUN ======================
 async def main():
     global bot
-    print(f"[BOT] Start: classic hunter + balance_id={LZT_BALANCE_ID}")
+    logger.info("Start: classic hunter + balance_id=%s", LZT_BALANCE_ID)
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
@@ -2601,7 +2607,7 @@ async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=False)
     except Exception as e:
-        print(f"[BOT] WARN: cannot delete webhook: {e}")
+        logger.warning("cannot delete webhook: %s", e)
 
     await init_db()
     asyncio.create_task(error_reporter_loop())

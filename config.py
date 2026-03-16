@@ -1,8 +1,10 @@
-API_TOKEN = "8728408716:AAEzZeaxGYj7BZdWKP2bXrCoQAneAI73p2Q"
-LZT_API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MzU4OTk3MCwianRpIjoiOTQ2MTg5Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MzEyNjk5NzB9.iE-8GkC-fb76ICD9nkVcIj9GRpcVoJE0yZsV2B2wCHRarKTXF3fFEQJaETGkGvS2a5K8cM11J4820SUQATGWGXqZlPXU0n4clbrRF5cufdyBLW79FxSUdLta4TMGWA2XQ-1q2YiWr4I_02pLp2I7XR8FIKNj2xEmItX30MlsDyo"
+import os
+
+API_TOKEN = (os.getenv("API_TOKEN") or "").strip()
+LZT_API_KEY = (os.getenv("LZT_API_KEY") or "").strip()
 
 # URL категории miHoYo
-LZT_URL = "https://api.lzt.market/category/mihoyo?sort_by=date&order=desc"
+LZT_URL = (os.getenv("LZT_URL") or "https://api.lzt.market/category/mihoyo?sort_by=date&order=desc").strip()
 
 # Интервал проверки новых лотов (в секундах)
-CHECK_INTERVAL = 5
+CHECK_INTERVAL = int((os.getenv("CHECK_INTERVAL") or "5").strip())
