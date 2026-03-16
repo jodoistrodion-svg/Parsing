@@ -17,6 +17,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
 
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
+from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
+from bot.ui import render_status_card
 
 # ====================== ENV ======================
 API_TOKEN = os.getenv("API_TOKEN") or _API_TOKEN
@@ -91,6 +93,7 @@ AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "10")
 AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "10").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "1.60").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
+AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "3").strip())
 
 # ====================== LOGGING ======================
 AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
@@ -687,15 +690,15 @@ async def show_status(user_id: int, chat_id: int):
     hunter_state = "🟢 Запущен" if user_hunter_mode.get(user_id) == "classic" and user_search_active.get(user_id) else "🔴 Остановлен"
     balance_text = await get_account_buy_balance_text()
 
-    text = (
-        "📊 Статус\n\n"
-        f"• Охотник: {hunter_state}\n"
-        f"• URL: {len(sources)} (активных: {active_sources})\n"
-        f"• Автобай URL: {autobuy_sources}\n"
-        f"• Ошибки API: {user_api_errors.get(user_id, 0)}\n"
-        f"• Баланс (accounts): {balance_text}"
+    text = render_status_card(
+        total_sources=len(sources),
+        active_sources=active_sources,
+        autobuy_sources=autobuy_sources,
+        hunter_state=hunter_state,
+        api_errors=user_api_errors.get(user_id, 0),
+        balance_text=balance_text,
     )
-    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id))
+    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id), parse_mode="HTML")
 
 
 def parse_user_id_from_button(text: str) -> int | None:
@@ -1577,71 +1580,7 @@ def make_card(item: dict, source_name: str) -> str:
 
 # ====================== AUTOBUY ======================
 def _autobuy_buy_urls(source_url: str, item_id: int):
-    source_url = (source_url or "").strip()
-    source_base = ""
-    try:
-        parts = urlsplit(source_url)
-        if parts.scheme and parts.netloc:
-            source_base = f"{parts.scheme}://{parts.netloc}"
-    except Exception:
-        source_base = ""
-
-    base_hosts = ["https://prod-api.lzt.market", "https://api.lzt.market", "https://api.lolz.live"]
-
-    source_low = source_url.lower()
-    source_is_api = source_base and any(marker in source_low for marker in ("api.", "prod-api."))
-    if source_base and source_is_api:
-        base_hosts.insert(0, source_base)
-    elif source_base:
-        # Для web-URL (например, https://lzt.market/...) API-эндпоинты приоритетнее.
-        # Иначе AUTOBUY_URL_LIMIT может обрезать список до web-путей с 404.
-        base_hosts.append(source_base)
-
-    dedup_bases = []
-    seen_bases = set()
-    for base in base_hosts:
-        if base in seen_bases:
-            continue
-        seen_bases.add(base)
-        dedup_bases.append(base)
-
-    # Важно: первые URL используются в fast-режиме и ограничиваются AUTOBUY_URL_LIMIT.
-    # Поэтому в приоритете оставляем API-пути, которые реально встречаются в маркет-API,
-    # а web-путь item/{id}/buy убираем из ранних попыток (он часто 404).
-    fast_paths = [
-        "{id}/confirm-buy",
-        "market/{id}/confirm-buy",
-        "{id}/fast-buy",
-        "market/{id}/fast-buy",
-        "{id}/buy",
-        "market/{id}/buy",
-    ]
-    slow_paths = [
-        "{id}/purchase",
-        "{id}/confirm-buy",
-        "market/{id}/purchase",
-        "market/{id}/confirm-buy",
-        "item/{id}/fast-buy",
-        "item/{id}/confirm-buy",
-        "item/{id}/buy",
-        "item/{id}/purchase",
-        "items/{id}/buy",
-        "items/{id}/fast-buy",
-        "items/{id}/confirm-buy",
-        "items/{id}/purchase",
-    ]
-
-    urls = []
-    seen = set()
-    for path_list in (fast_paths, slow_paths):
-        for base in dedup_bases:
-            for tpl in path_list:
-                url = f"{base}/{tpl.format(id=item_id)}"
-                if url in seen:
-                    continue
-                seen.add(url)
-                urls.append(url)
-    return urls
+    return build_buy_urls(source_url, item_id)
 
 
 def _autobuy_cache_key(source_url: str) -> str:
@@ -1658,17 +1597,8 @@ def _autobuy_prioritized_urls(source_url: str, item_id: int):
     all_urls = _autobuy_buy_urls(source_url, item_id)
     cache_key = _autobuy_cache_key(source_url)
     preferred = autobuy_endpoint_cache.get(cache_key, [])
-    if preferred:
-        pref_item_urls = [tpl.format(id=item_id) for tpl in preferred]
-        ordered = []
-        seen = set()
-        for u in pref_item_urls + all_urls:
-            if u in seen:
-                continue
-            seen.add(u)
-            ordered.append(u)
-        return ordered
-    return all_urls
+    pref_item_urls = [tpl.format(id=item_id) for tpl in preferred]
+    return prioritize_buy_urls(all_urls, pref_item_urls)
 
 
 def _remember_autobuy_endpoint(source_url: str, used_url: str):
@@ -1863,74 +1793,87 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     async with buy_semaphore:
         last_error = "no_attempts"
         pending: set[asyncio.Task] = set()
+        next_idx = 0
+        burst_wave = max(1, min(parallel_requests, AUTOBUY_BURST_FIRST_WAVE if AUTOBUY_BURST_FIRST_WAVE > 0 else parallel_requests))
+        deadline = t0 + AUTOBUY_MAX_DURATION_SEC if AUTOBUY_MAX_DURATION_SEC > 0 else None
 
-        for idx, buy_url in enumerate(attempt_urls, start=1):
-            pending.add(asyncio.create_task(_post_buy(idx, buy_url)))
+        while next_idx < len(attempt_urls) or pending:
+            now = time.perf_counter()
+            if deadline and now >= deadline:
+                break
 
-            if len(pending) < parallel_requests and idx < len(attempt_urls):
+            target_parallel = burst_wave if next_idx < burst_wave else parallel_requests
+            while next_idx < len(attempt_urls) and len(pending) < target_parallel:
+                idx = next_idx + 1
+                pending.add(asyncio.create_task(_post_buy(idx, attempt_urls[next_idx])))
+                next_idx += 1
+
+            if not pending:
                 continue
 
-            while pending:
-                done = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                finished = done[0]
-                pending = done[1]
+            wait_timeout = None
+            if deadline:
+                wait_timeout = max(0.001, deadline - time.perf_counter())
 
-                for task in finished:
-                    t_idx, t_url, status, state, info = await task
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED, timeout=wait_timeout)
+            if not done:
+                break
 
-                    if state == "success":
-                        _remember_autobuy_endpoint(source_url, t_url)
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return True, f"{t_url} -> {info}"
-                    if state == "auth":
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return False, f"{t_url} -> HTTP {status}: ошибка авторизации API ({info})"
-                    if state == "secret":
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return False, f"{t_url} -> требуется ручная проверка/секретный ответ ({info})"
-                    if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, t_url)
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return False, f"{t_url} -> {info}"
-                    if state == "queue":
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return False, f"{t_url} -> queue: {info}"
+            for task in done:
+                t_idx, t_url, status, state, info = await task
 
-                    if state in {"timeout", "error"}:
-                        last_error = f"{t_url} -> {info}"
-                        continue
+                if state == "success":
+                    _remember_autobuy_endpoint(source_url, t_url)
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return True, f"{t_url} -> {info}"
+                if state == "auth":
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return False, f"{t_url} -> HTTP {status}: ошибка авторизации API ({info})"
+                if state == "secret":
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return False, f"{t_url} -> требуется ручная проверка/секретный ответ ({info})"
+                if state == "terminal":
+                    _remember_autobuy_endpoint(source_url, t_url)
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return False, f"{t_url} -> {info}"
+                if state == "queue":
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return False, f"{t_url} -> queue: {info}"
 
-                    last_error = f"{t_url} -> HTTP {status}: {info}"
-                    if _autobuy_is_terminal_failure(state, status, info):
-                        for p in pending:
-                            p.cancel()
-                        if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
-                        return False, last_error
+                if state in {"timeout", "error"}:
+                    last_error = f"{t_url} -> {info}"
+                    continue
 
-                if len(pending) < parallel_requests:
-                    break
+                last_error = f"{t_url} -> HTTP {status}: {info}"
+                if _autobuy_is_terminal_failure(state, status, info):
+                    for p in pending:
+                        p.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return False, last_error
 
         if pending:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
+        if deadline and time.perf_counter() >= deadline and last_error == "no_attempts":
+            return False, "autobuy_deadline_reached"
         return False, last_error
 
 
