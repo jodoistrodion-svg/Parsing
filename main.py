@@ -2376,6 +2376,13 @@ async def main():
 
     bot = Bot(token=API_TOKEN)
 
+    # Если у бота раньше был включён webhook (например, после деплоя на хостинг),
+    # polling не будет получать новые апдейты, пока webhook не удалён.
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+    except Exception as e:
+        print(f"[BOT] WARN: cannot delete webhook: {e}")
+
     await init_db()
     asyncio.create_task(error_reporter_loop())
 
