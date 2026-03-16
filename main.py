@@ -26,7 +26,14 @@ from database.db import apply_sqlite_pragmas
 from services.http_client import build_connector, default_headers
 
 # ====================== ENV ======================
-API_TOKEN = os.getenv("API_TOKEN") or _API_TOKEN
+def _normalize_telegram_token(raw: str | None) -> str:
+    token = (raw or "").strip().strip('"').strip("'")
+    if token.lower().startswith("bot") and re.match(r"^bot\d{6,12}:", token, flags=re.IGNORECASE):
+        token = token[3:]
+    return token
+
+
+API_TOKEN = _normalize_telegram_token(os.getenv("API_TOKEN") or _API_TOKEN)
 LZT_API_KEY = os.getenv("LZT_API_KEY") or _LZT_API_KEY
 LZT_BALANCE_ID = int((os.getenv("LZT_BALANCE_ID") or "20212").strip())
 
