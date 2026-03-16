@@ -1723,7 +1723,10 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     if not buy_urls:
         return False, "buy_url_not_found"
 
-    payload = {"balance_id": LZT_BALANCE_ID}
+    payload = {
+        "balance_id": LZT_BALANCE_ID,
+        "buy_without_validation": 1,
+    }
     if LZT_SECRET_WORD:
         payload["secret_answer"] = LZT_SECRET_WORD
 
