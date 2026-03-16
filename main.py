@@ -1622,11 +1622,18 @@ def _remember_autobuy_endpoint(source_url: str, used_url: str):
 def _autobuy_classify_response(status: int, text: str):
     raw = html.unescape(text or "")
     lower = raw.lower()
+    data = None
     try:
         data = json.loads(raw)
         joined = json.dumps(data, ensure_ascii=False).lower()
     except Exception:
         joined = lower
+
+    if isinstance(data, dict):
+        status_flag = str(data.get("status") or data.get("result") or "").strip().lower()
+        success_flag = data.get("success")
+        if status_flag in {"error", "failed", "fail"} or success_flag is False:
+            return "retry", raw[:220], False
 
     success_markers = ("success", "ok", "purchased", "purchase complete", "already bought", "уже куп")
     terminal_error_markers = (
@@ -1676,6 +1683,45 @@ def _sanitize_buy_info_for_user(info: str) -> str:
     s = str(info or "")
     s = re.sub(r"https?://\S+", "[api-endpoint]", s)
     return s
+
+
+def _extract_item_price(item: dict):
+    for key in ("price", "amount", "sum", "cost"):
+        val = item.get(key)
+        if val not in (None, "", "—"):
+            return val
+    return None
+
+
+def _extract_item_time(item: dict):
+    for key in ("published_at", "created_at", "date", "time", "updated_at", "edited_at"):
+        val = item.get(key)
+        if val not in (None, ""):
+            return val
+    return None
+
+
+def _format_item_time_human(value) -> str:
+    if value in (None, ""):
+        return "—"
+    try:
+        if isinstance(value, str) and not value.strip().isdigit():
+            return value.strip()
+        ts = int(float(value))
+        if ts > 0:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    except Exception:
+        pass
+    return str(value)
+
+
+async def _send_buy_result_immediately(chat_id: int, user_id: int, text: str):
+    try:
+        await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        return
+    except Exception as e:
+        log_autobuy(f"BUY_NOTIFY_IMMEDIATE_ERR chat_id={chat_id} err='{_safe_compact(str(e),220)}'")
+    enqueue_hunter_notification(user_id, chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 def _autobuy_is_terminal_failure(state: str, status: int, info: str) -> bool:
@@ -1905,28 +1951,31 @@ async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item
         buy_info = f"autobuy_runtime_error: {e}"
         log_autobuy(f"BUY_MARK_ERR user_id={user_id} item_key={item_key} err='{_safe_compact(str(e),220)}'")
 
-    if bought:
-        dur_ms = int((time.perf_counter() - found_perf) * 1000)
-        bought_link = item.get("url") or item.get("link") or (f"https://lzt.market/{item_id}" if item_id is not None else "")
-        buy_result_text = (
-            f"🛒 <b>Автобай</b> ✅ [{html.escape(src_name)}] "
-            f"item_id=<code>{html.escape(str(item_id))}</code> "
-            f"⏱ <b>{dur_ms}ms</b>\n"
-            f"🔗 {html.escape(str(bought_link))}\n"
-            f"{html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
-        )
-    else:
-        buy_result_text = (
-            f"🛒 <b>Автобай</b> ❌ [{html.escape(src_name)}] "
-            f"item_id=<code>{html.escape(str(item_id))}</code>\n{html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
-        )
+    dur_ms = int((time.perf_counter() - found_perf) * 1000)
+    bought_link = item.get("url") or item.get("link") or (f"https://lzt.market/{item_id}" if item_id is not None else "")
+    lot_price = _extract_item_price(item)
+    lot_time = _format_item_time_human(_extract_item_time(item))
+    now_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    result_emoji = "✅" if bought else "❌"
+    result_word = "Успех" if bought else "Ошибка"
+    buy_result_text = (
+        f"🛒 <b>Автобай {result_emoji}</b> [{html.escape(src_name)}]\n"
+        f"📌 Статус: <b>{result_word}</b>\n"
+        f"🆔 item_id: <code>{html.escape(str(item_id))}</code>\n"
+        f"⏱ Время покупки: <b>{html.escape(now_text)}</b>\n"
+        f"⚡ Задержка после обнаружения: <b>{dur_ms}ms</b>\n"
+        f"💰 Цена: <b>{html.escape(_format_value(lot_price) if lot_price is not None else '—')} ₽</b>\n"
+        f"🕒 Время лота: <b>{html.escape(lot_time)}</b>\n"
+        f"🔗 Лот: {html.escape(str(bought_link))}\n"
+        f"ℹ️ Детали: {html.escape(_sanitize_buy_info_for_user(str(buy_info)))}"
+    )
 
     log_autobuy(
         f"BUY_RESULT user_id={user_id} item_key={item_key} bought={int(bool(bought))} "
         f"persist_attempt={int(bool(should_mark_attempt))} info='{_safe_compact(str(buy_info),240)}'"
     )
 
-    enqueue_hunter_notification(user_id, chat_id, buy_result_text, parse_mode="HTML", disable_web_page_preview=True)
+    await _send_buy_result_immediately(chat_id, user_id, buy_result_text)
 
 
 async def hunter_loop_for_user(user_id: int, chat_id: int):
