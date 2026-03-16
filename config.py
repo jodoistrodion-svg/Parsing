@@ -1,7 +1,7 @@
 import os
 
-API_TOKEN = (os.getenv("API_TOKEN") or "").strip()
-LZT_API_KEY = (os.getenv("LZT_API_KEY") or "").strip()
+API_TOKEN = (os.getenv("8728408716:AAEzZeaxGYj7BZdWKP2bXrCoQAneAI73p2Q") or "8728408716:AAEzZeaxGYj7BZdWKP2bXrCoQAneAI73p2Q").strip()
+LZT_API_KEY = (os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MzY4MzIwMiwianRpIjoiOTQ2NzM5Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MzEzNjMyMDJ9.qvrpUlO_IHNutTpYDAOAF_hQam7fDHOHeV7-eO3RdEsazWDNwbSQw8SX6PJaxHlMuQY0lQheTZG2b2MQssNGF7yeHSfWJxndtpxpKBz4xSrZ2gXpEd9AJ2-_Lpi6N8Acb3GIaWKsmC7V-DIUC7s1VfmqkWcU9KH_UKZ8EWPl1wk") or "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjYyOTA2MzYsImlzcyI6Imx6dCIsImlhdCI6MTc3MzY4MzIwMiwianRpIjoiOTQ2NzM5Iiwic2NvcGUiOiJiYXNpYyByZWFkIHBvc3QgY29udmVyc2F0ZSBwYXltZW50IGludm9pY2UgY2hhdGJveCBtYXJrZXQiLCJleHAiOjE5MzEzNjMyMDJ9.qvrpUlO_IHNutTpYDAOAF_hQam7fDHOHeV7-eO3RdEsazWDNwbSQw8SX6PJaxHlMuQY0lQheTZG2b2MQssNGF7yeHSfWJxndtpxpKBz4xSrZ2gXpEd9AJ2-_Lpi6N8Acb3GIaWKsmC7V-DIUC7s1VfmqkWcU9KH_UKZ8EWPl1wk").strip()
 
 # URL категории miHoYo
 LZT_URL = (os.getenv("LZT_URL") or "https://api.lzt.market/category/mihoyo?sort_by=date&order=desc").strip()
