@@ -92,6 +92,7 @@ AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "0").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
 AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "24").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "2.8").strip())
+AUTOBUY_TOTAL_RETRY_WINDOW_SEC = float((os.getenv("AUTOBUY_TOTAL_RETRY_WINDOW_SEC") or "6.0").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "24").strip())
 USER_ACTION_FETCH_TIMEOUT = float((os.getenv("USER_ACTION_FETCH_TIMEOUT") or "2.4").strip())
@@ -1798,7 +1799,7 @@ def _normalize_command_text(text: str) -> str:
     return ""
 
 
-async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None):
+async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None = None, max_duration_override: float | None = None):
     if not LZT_API_KEY:
         return False, "LZT_API_KEY не задан"
 
@@ -1882,7 +1883,10 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
         pending: set[asyncio.Task] = set()
         next_idx = 0
         burst_wave = max(1, min(parallel_requests, AUTOBUY_BURST_FIRST_WAVE if AUTOBUY_BURST_FIRST_WAVE > 0 else parallel_requests))
-        deadline = t0 + AUTOBUY_MAX_DURATION_SEC if AUTOBUY_MAX_DURATION_SEC > 0 else None
+        max_duration_sec = AUTOBUY_MAX_DURATION_SEC
+        if max_duration_override is not None:
+            max_duration_sec = max(0.0, min(max_duration_sec if max_duration_sec > 0 else max_duration_override, max_duration_override))
+        deadline = t0 + max_duration_sec if max_duration_sec > 0 else None
 
         while next_idx < len(attempt_urls) or pending:
             now = time.perf_counter()
@@ -1964,6 +1968,15 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
         return False, last_error
 
 
+def _remaining_autobuy_window_sec(found_perf: float | None) -> float | None:
+    if found_perf is None:
+        return None
+    if AUTOBUY_TOTAL_RETRY_WINDOW_SEC <= 0:
+        return None
+    elapsed = time.perf_counter() - found_perf
+    return AUTOBUY_TOTAL_RETRY_WINDOW_SEC - elapsed
+
+
 async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = None):
     item_key = make_item_key(item)
     lock = get_buy_lock(item_key)
@@ -1973,7 +1986,12 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
         last_info = "autobuy_no_attempts"
 
         for i in range(1, attempts + 1):
-            bought, info = await _try_autobuy_once(source, item, found_perf=found_perf)
+            remaining_window = _remaining_autobuy_window_sec(found_perf)
+            if remaining_window is not None and remaining_window <= 0:
+                return False, f"attempt={i-1}/{attempts} | autobuy_total_window_exceeded"
+
+            max_attempt_window = remaining_window if remaining_window is not None else None
+            bought, info = await _try_autobuy_once(source, item, found_perf=found_perf, max_duration_override=max_attempt_window)
             last_info = str(info)
             if bought:
                 return True, f"attempt={i}/{attempts} | {info}"
@@ -1985,7 +2003,13 @@ async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = 
                 is_queue = "queue" in last_info.lower()
                 delay = _autobuy_retry_delay(is_queue=is_queue)
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    remaining_window = _remaining_autobuy_window_sec(found_perf)
+                    if remaining_window is not None and remaining_window <= 0:
+                        return False, f"attempt={i}/{attempts} | autobuy_total_window_exceeded"
+                    if remaining_window is not None:
+                        delay = min(delay, max(0.0, remaining_window))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
 
         return False, f"attempt={attempts}/{attempts} | {last_info}"
 
