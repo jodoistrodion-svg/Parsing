@@ -88,6 +88,7 @@ AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY"
 FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.18").strip())
 AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "10").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "10").strip())
+AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "10").strip())
 AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "1.60").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
 
@@ -625,6 +626,76 @@ def build_users_picker_kb(users: list[tuple[int, int, str]], page: int) -> Reply
 
     rows.append([KeyboardButton(text="⬅️ Назад")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+async def show_urls_list_screen(user_id: int, chat_id: int, page: int = 0):
+    sources = await get_all_sources(user_id, enabled_only=False)
+    if not sources:
+        user_modes[user_id] = None
+        user_page_state[user_id] = {"ctx": None, "page": 0}
+        await send_screen(chat_id, user_id, "URL пуст. Добавь источник.", reply_markup=kb_urls_menu())
+        return
+
+    total_pages = (len(sources) + URL_PAGE_SIZE - 1) // URL_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    user_modes[user_id] = "pick_list"
+    user_page_state[user_id] = {"ctx": "pick_list", "page": page}
+
+    enabled_count = sum(1 for s in sources if s.get("enabled", True))
+    autobuy_count = sum(1 for s in sources if s.get("autobuy", False))
+    title = (
+        f"📄 Список URL ({len(sources)})\n"
+        f"• Активных: {enabled_count}\n"
+        f"• С автобаем: {autobuy_count}\n"
+        "Нажми на URL для деталей."
+    )
+    await send_screen(chat_id, user_id, title, reply_markup=build_urls_picker_kb(sources, page=page, back_text="⬅️ Назад"))
+
+
+async def show_users_screen(user_id: int, chat_id: int, page: int = 0):
+    users = await db_list_users(USER_PAGE_SIZE, max(page, 0) * USER_PAGE_SIZE)
+    total = await db_count_users()
+
+    if total <= 0:
+        user_modes[user_id] = None
+        user_page_state[user_id] = {"ctx": None, "page": 0}
+        await send_screen(chat_id, user_id, "👥 Пользователей пока нет.", reply_markup=kb_main(user_id))
+        return
+
+    total_pages = (total + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    users = await db_list_users(USER_PAGE_SIZE, page * USER_PAGE_SIZE)
+
+    user_modes[user_id] = "users_pick"
+    user_page_state[user_id] = {"ctx": "users_pick", "page": page}
+
+    allowed_count = sum(1 for _uid, allowed, _role in users if allowed)
+    text = (
+        f"👥 Пользователи: {total}\n"
+        f"• На странице: {len(users)}\n"
+        f"• Разрешено на странице: {allowed_count}\n"
+        "Нажми на пользователя, чтобы переключить доступ."
+    )
+    await send_screen(chat_id, user_id, text, reply_markup=build_users_picker_kb(users, page=page))
+
+
+async def show_status(user_id: int, chat_id: int):
+    sources = await get_all_sources(user_id, enabled_only=False)
+    active_sources = sum(1 for s in sources if s.get("enabled", True))
+    autobuy_sources = sum(1 for s in sources if s.get("autobuy", False))
+    hunter_state = "🟢 Запущен" if user_hunter_mode.get(user_id) == "classic" and user_search_active.get(user_id) else "🔴 Остановлен"
+    balance_text = await get_account_buy_balance_text()
+
+    text = (
+        "📊 Статус\n\n"
+        f"• Охотник: {hunter_state}\n"
+        f"• URL: {len(sources)} (активных: {active_sources})\n"
+        f"• Автобай URL: {autobuy_sources}\n"
+        f"• Ошибки API: {user_api_errors.get(user_id, 0)}\n"
+        f"• Баланс (accounts): {balance_text}"
+    )
+    await send_screen(chat_id, user_id, text, reply_markup=kb_main(user_id))
 
 
 def parse_user_id_from_button(text: str) -> int | None:
@@ -1761,50 +1832,104 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     max_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS if AUTOBUY_MAX_HTTP_ATTEMPTS > 0 else len(buy_urls)
     attempt_urls = buy_urls[:max_attempts]
+    parallel_requests = max(1, min(len(attempt_urls), AUTOBUY_PARALLEL_HTTP if AUTOBUY_PARALLEL_HTTP > 0 else len(attempt_urls)))
 
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} urls={len(attempt_urls)}"
+        f"since_found_ms={since_found_ms} urls={len(attempt_urls)} parallel={parallel_requests} buy_without_validation=1"
     )
 
     session = await get_session()
     common_headers = _default_api_headers()
     headers_json = {**common_headers, "Content-Type": "application/json"}
 
+    async def _post_buy(idx: int, buy_url: str):
+        try:
+            bucket, min_interval = _api_limit_bucket("POST", buy_url)
+            await request_rate_limiter.wait(bucket, min_interval)
+            async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
+                body = await resp.text()
+                state, info, _ = _autobuy_classify_response(resp.status, body)
+                log_autobuy(
+                    f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
+                    f"status={resp.status} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
+                )
+                return idx, buy_url, resp.status, state, info
+        except asyncio.TimeoutError:
+            return idx, buy_url, 0, "timeout", "buy_timeout"
+        except Exception as e:
+            return idx, buy_url, 0, "error", str(e)
+
     async with buy_semaphore:
         last_error = "no_attempts"
+        pending: set[asyncio.Task] = set()
+
         for idx, buy_url in enumerate(attempt_urls, start=1):
-            try:
-                bucket, min_interval = _api_limit_bucket("POST", buy_url)
-                await request_rate_limiter.wait(bucket, min_interval)
-                async with session.post(buy_url, headers=headers_json, json=payload, timeout=FAST_AUTOBUY_TIMEOUT) as resp:
-                    body = await resp.text()
-                    state, info, _ = _autobuy_classify_response(resp.status, body)
-                    log_autobuy(
-                        f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
-                        f"status={resp.status} state={state} url={buy_url} info='{_safe_compact(info,220)}'"
-                    )
+            pending.add(asyncio.create_task(_post_buy(idx, buy_url)))
+
+            if len(pending) < parallel_requests and idx < len(attempt_urls):
+                continue
+
+            while pending:
+                done = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                finished = done[0]
+                pending = done[1]
+
+                for task in finished:
+                    t_idx, t_url, status, state, info = await task
 
                     if state == "success":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return True, f"{buy_url} -> {info}"
+                        _remember_autobuy_endpoint(source_url, t_url)
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return True, f"{t_url} -> {info}"
                     if state == "auth":
-                        return False, f"{buy_url} -> HTTP {resp.status}: ошибка авторизации API ({info})"
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return False, f"{t_url} -> HTTP {status}: ошибка авторизации API ({info})"
                     if state == "secret":
-                        return False, f"{buy_url} -> требуется ручная проверка/секретный ответ ({info})"
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return False, f"{t_url} -> требуется ручная проверка/секретный ответ ({info})"
                     if state == "terminal":
-                        _remember_autobuy_endpoint(source_url, buy_url)
-                        return False, f"{buy_url} -> {info}"
+                        _remember_autobuy_endpoint(source_url, t_url)
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return False, f"{t_url} -> {info}"
                     if state == "queue":
-                        return False, f"{buy_url} -> queue: {info}"
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return False, f"{t_url} -> queue: {info}"
 
-                    last_error = f"{buy_url} -> HTTP {resp.status}: {info}"
-                    if _autobuy_is_terminal_failure(state, resp.status, info):
+                    if state in {"timeout", "error"}:
+                        last_error = f"{t_url} -> {info}"
+                        continue
+
+                    last_error = f"{t_url} -> HTTP {status}: {info}"
+                    if _autobuy_is_terminal_failure(state, status, info):
+                        for p in pending:
+                            p.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
                         return False, last_error
-            except asyncio.TimeoutError:
-                last_error = f"{buy_url} -> buy_timeout"
-            except Exception as e:
-                last_error = f"{buy_url} -> {e}"
+
+                if len(pending) < parallel_requests:
+                    break
+
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
         return False, last_error
 
