@@ -508,6 +508,10 @@ async def send_screen(chat_id: int, user_id: int, text: str, reply_markup: Reply
     return msg
 
 
+async def show_denied(user_id: int, chat_id: int):
+    await send_screen(chat_id, user_id, DENIED_TEXT, reply_markup=kb_request())
+
+
 async def upsert_no_lots_message(chat_id: int, user_id: int, text: str):
     if bot is None:
         return
