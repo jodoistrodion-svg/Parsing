@@ -2126,16 +2126,6 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
             if new_items_processed == 0:
                 no_lots_streak += 1
-                ts = time.strftime("%H:%M:%S", time.localtime())
-                await upsert_no_lots_message(
-                    chat_id,
-                    user_id,
-                    (
-                        "ℹ️ <b>Новых лотов пока нет</b>\n"
-                        f"• Обновлено: <b>{ts}</b>\n"
-                        f"• Пустых циклов подряд: <b>{no_lots_streak}</b>"
-                    ),
-                )
             else:
                 no_lots_streak = 0
                 reset_no_lots_message(user_id)
