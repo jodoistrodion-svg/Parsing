@@ -1,0 +1,10 @@
+# local secrets and runtime files
+.env
+local_settings/settings.json
+local_settings/tokens/*.txt
+
+# python cache
+__pycache__/
+*.pyc
+
+autobuy.log

@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
 
-from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
+from pathlib import Path
 from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
 from bot.ui import render_status_card
 from utils.logger import logger
@@ -25,7 +25,15 @@ from parser.parser import parse_urls_concurrent
 from database.db import apply_sqlite_pragmas
 from services.http_client import build_connector, default_headers
 
-# ====================== ENV ======================
+# ====================== ENV / LOCAL SETTINGS ======================
+ROOT_DIR = Path(__file__).resolve().parent
+LOCAL_SETTINGS_DIR = ROOT_DIR / "local_settings"
+TOKEN_FILES = {
+    "API_TOKEN": LOCAL_SETTINGS_DIR / "tokens" / "telegram_token.txt",
+    "LZT_API_KEY": LOCAL_SETTINGS_DIR / "tokens" / "lzt_api_key.txt",
+}
+
+
 def _normalize_telegram_token(raw: str | None) -> str:
     token = (raw or "").strip().strip('"').strip("'")
     if token.lower().startswith("bot") and re.match(r"^bot\d{6,12}:", token, flags=re.IGNORECASE):
@@ -33,9 +41,48 @@ def _normalize_telegram_token(raw: str | None) -> str:
     return token
 
 
-API_TOKEN = _normalize_telegram_token(os.getenv("API_TOKEN") or _API_TOKEN)
-LZT_API_KEY = os.getenv("LZT_API_KEY") or _LZT_API_KEY
-LZT_BALANCE_ID = int((os.getenv("LZT_BALANCE_ID") or "20212").strip())
+def _read_token_file(name: str) -> str:
+    path = TOKEN_FILES[name]
+    try:
+        return path.read_text(encoding="utf-8").strip().strip('"').strip("'")
+    except FileNotFoundError:
+        return ""
+
+
+def _load_local_json_settings() -> dict:
+    settings_path = LOCAL_SETTINGS_DIR / "settings.json"
+    try:
+        raw = settings_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        logger.warning("settings.json has invalid JSON, fallback to defaults")
+        return {}
+
+
+LOCAL_JSON_SETTINGS = _load_local_json_settings()
+
+
+def _cfg(name: str, default: str = "") -> str:
+    env_val = os.getenv(name)
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip()
+    json_val = LOCAL_JSON_SETTINGS.get(name)
+    if json_val is None:
+        return default
+    if isinstance(json_val, bool):
+        return "1" if json_val else "0"
+    return str(json_val).strip()
+
+
+API_TOKEN = _normalize_telegram_token(_cfg("API_TOKEN") or _read_token_file("API_TOKEN"))
+LZT_API_KEY = _cfg("LZT_API_KEY") or _read_token_file("LZT_API_KEY")
+LZT_BALANCE_ID = int((_cfg("LZT_BALANCE_ID", "20212") or "20212").strip())
 
 bot: Bot | None = None
 dp = Dispatcher()
@@ -58,17 +105,17 @@ def _parse_int_list(raw: str) -> set[int]:
     return result
 
 
-OWNER_ID = int((os.getenv("OWNER_ID") or "1377985336").strip())
-OWNER_IDS = _parse_int_list(os.getenv("OWNER_IDS") or "") or {OWNER_ID}
-ACCESS_MODE = (os.getenv("ACCESS_MODE") or "open").strip().lower()
+OWNER_ID = int((_cfg("OWNER_ID") or "1377985336").strip())
+OWNER_IDS = _parse_int_list(_cfg("OWNER_IDS") or "") or {OWNER_ID}
+ACCESS_MODE = (_cfg("ACCESS_MODE") or "open").strip().lower()
 ACCESS_OPEN = ACCESS_MODE in {"open", "all", "public", "0"}
 
 # ====================== НАСТРОЙКИ ======================
-HUNTER_INTERVAL_BASE = float((os.getenv("HUNTER_INTERVAL_BASE") or "0.02").strip())
-FETCH_TIMEOUT = float((os.getenv("FETCH_TIMEOUT") or "1.20").strip())
-BUY_TIMEOUT = float((os.getenv("BUY_TIMEOUT") or "0.32").strip())
-RETRY_MAX = int((os.getenv("RETRY_MAX") or "1").strip())
-RETRY_BASE_DELAY = float((os.getenv("RETRY_BASE_DELAY") or "0.01").strip())
+HUNTER_INTERVAL_BASE = float((_cfg("HUNTER_INTERVAL_BASE") or "0.02").strip())
+FETCH_TIMEOUT = float((_cfg("FETCH_TIMEOUT") or "1.20").strip())
+BUY_TIMEOUT = float((_cfg("BUY_TIMEOUT") or "0.32").strip())
+RETRY_MAX = int((_cfg("RETRY_MAX") or "1").strip())
+RETRY_BASE_DELAY = float((_cfg("RETRY_BASE_DELAY") or "0.01").strip())
 
 SHORT_CARD_MAX = 3200
 ERROR_REPORT_INTERVAL = 3600
@@ -76,45 +123,45 @@ ERROR_REPORT_INTERVAL = 3600
 MAX_URLS_PER_USER_DEFAULT = 50
 MAX_URLS_PER_USER_LIMITED = 3
 
-MAX_CONCURRENT_REQUESTS = int((os.getenv("MAX_CONCURRENT_REQUESTS") or "512").strip())
+MAX_CONCURRENT_REQUESTS = int((_cfg("MAX_CONCURRENT_REQUESTS") or "512").strip())
 LIMITED_EXTRA_DELAY = 0.0
-MAX_NEW_ITEMS_PER_CYCLE = int((os.getenv("MAX_NEW_ITEMS_PER_CYCLE") or "1000").strip())
-SEARCH_MIN_REQUEST_INTERVAL = float((os.getenv("SEARCH_MIN_REQUEST_INTERVAL") or "0.0").strip())
-OTHER_MIN_REQUEST_INTERVAL = float((os.getenv("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
-BUY_MIN_REQUEST_INTERVAL = float((os.getenv("BUY_MIN_REQUEST_INTERVAL") or "0.0").strip())
-NON_AUTOBUY_CYCLE_EVERY = int((os.getenv("NON_AUTOBUY_CYCLE_EVERY") or "5").strip())
+MAX_NEW_ITEMS_PER_CYCLE = int((_cfg("MAX_NEW_ITEMS_PER_CYCLE") or "1000").strip())
+SEARCH_MIN_REQUEST_INTERVAL = float((_cfg("SEARCH_MIN_REQUEST_INTERVAL") or "0.0").strip())
+OTHER_MIN_REQUEST_INTERVAL = float((_cfg("OTHER_MIN_REQUEST_INTERVAL") or "0.0").strip())
+BUY_MIN_REQUEST_INTERVAL = float((_cfg("BUY_MIN_REQUEST_INTERVAL") or "0.0").strip())
+NON_AUTOBUY_CYCLE_EVERY = int((_cfg("NON_AUTOBUY_CYCLE_EVERY") or "5").strip())
 
-DB_FILE = (os.getenv("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
+DB_FILE = (_cfg("DB_FILE") or ("/data/bot_data.sqlite" if os.path.isdir("/data") else "bot_data.sqlite")).strip()
 
-LZT_SECRET_WORD = (os.getenv("LZT_SECRET_WORD") or "Мазда").strip()
-SEED_URLS_JSON = (os.getenv("SEED_URLS_JSON") or "").strip()
+LZT_SECRET_WORD = (_cfg("LZT_SECRET_WORD") or "Мазда").strip()
+SEED_URLS_JSON = (_cfg("SEED_URLS_JSON") or "").strip()
 
 URL_PAGE_SIZE = 12
 USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
-TG_SEND_DELAY = float((os.getenv("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((os.getenv("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
-AUTOBUY_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
-AUTOBUY_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_RETRY_MAX_DELAY") or "0.12").strip())
-AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.06").strip())
-AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((os.getenv("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.18").strip())
-FAST_AUTOBUY_TIMEOUT = float((os.getenv("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
-AUTOBUY_URL_LIMIT = int((os.getenv("AUTOBUY_URL_LIMIT") or "0").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((os.getenv("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
-AUTOBUY_PARALLEL_HTTP = int((os.getenv("AUTOBUY_PARALLEL_HTTP") or "24").strip())
-AUTOBUY_MAX_DURATION_SEC = float((os.getenv("AUTOBUY_MAX_DURATION_SEC") or "2.8").strip())
-AUTOBUY_TOTAL_RETRY_WINDOW_SEC = float((os.getenv("AUTOBUY_TOTAL_RETRY_WINDOW_SEC") or "6.0").strip())
-MAX_ITEMS_PER_SOURCE_SCAN = int((os.getenv("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
-AUTOBUY_BURST_FIRST_WAVE = int((os.getenv("AUTOBUY_BURST_FIRST_WAVE") or "24").strip())
-USER_ACTION_FETCH_TIMEOUT = float((os.getenv("USER_ACTION_FETCH_TIMEOUT") or "2.4").strip())
+TG_SEND_DELAY = float((_cfg("TG_SEND_DELAY") or "0.01").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((_cfg("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
+AUTOBUY_RETRY_MIN_DELAY = float((_cfg("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
+AUTOBUY_RETRY_MAX_DELAY = float((_cfg("AUTOBUY_RETRY_MAX_DELAY") or "0.12").strip())
+AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.06").strip())
+AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.18").strip())
+FAST_AUTOBUY_TIMEOUT = float((_cfg("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
+AUTOBUY_URL_LIMIT = int((_cfg("AUTOBUY_URL_LIMIT") or "0").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((_cfg("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
+AUTOBUY_PARALLEL_HTTP = int((_cfg("AUTOBUY_PARALLEL_HTTP") or "24").strip())
+AUTOBUY_MAX_DURATION_SEC = float((_cfg("AUTOBUY_MAX_DURATION_SEC") or "2.8").strip())
+AUTOBUY_TOTAL_RETRY_WINDOW_SEC = float((_cfg("AUTOBUY_TOTAL_RETRY_WINDOW_SEC") or "6.0").strip())
+MAX_ITEMS_PER_SOURCE_SCAN = int((_cfg("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
+AUTOBUY_BURST_FIRST_WAVE = int((_cfg("AUTOBUY_BURST_FIRST_WAVE") or "24").strip())
+USER_ACTION_FETCH_TIMEOUT = float((_cfg("USER_ACTION_FETCH_TIMEOUT") or "2.4").strip())
 
 # ====================== LOGGING ======================
-AUTOBUY_LOG_FILE = os.getenv("AUTOBUY_LOG_FILE") or "autobuy.log"
+AUTOBUY_LOG_FILE = _cfg("AUTOBUY_LOG_FILE") or "autobuy.log"
 LOG_MAX_BYTES = 15 * 1024 * 1024
 LOG_ROTATE_KEEP = 2
-PARSE_RESPONSE_CACHE_TTL = float((os.getenv("PARSE_RESPONSE_CACHE_TTL") or "0.25").strip())
-SEND_LOT_NOTIFICATIONS = (os.getenv("SEND_LOT_NOTIFICATIONS") or "0").strip().lower() in {"1","true","yes","on"}
+PARSE_RESPONSE_CACHE_TTL = float((_cfg("PARSE_RESPONSE_CACHE_TTL") or "0.25").strip())
+SEND_LOT_NOTIFICATIONS = (_cfg("SEND_LOT_NOTIFICATIONS") or "0").strip().lower() in {"1","true","yes","on"}
 parse_response_cache = TTLCache(ttl_sec=PARSE_RESPONSE_CACHE_TTL, max_size=10000)
 
 
