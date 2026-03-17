@@ -112,12 +112,12 @@ AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or 
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.18").strip())
 FAST_AUTOBUY_TIMEOUT = float((_cfg("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
 AUTOBUY_URL_LIMIT = int((_cfg("AUTOBUY_URL_LIMIT") or "0").strip())
-AUTOBUY_MAX_HTTP_ATTEMPTS = int((_cfg("AUTOBUY_MAX_HTTP_ATTEMPTS") or "4").strip())
-AUTOBUY_PARALLEL_HTTP = int((_cfg("AUTOBUY_PARALLEL_HTTP") or "3").strip())
+AUTOBUY_MAX_HTTP_ATTEMPTS = int((_cfg("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
+AUTOBUY_PARALLEL_HTTP = int((_cfg("AUTOBUY_PARALLEL_HTTP") or "24").strip())
 AUTOBUY_MAX_DURATION_SEC = float((_cfg("AUTOBUY_MAX_DURATION_SEC") or "2.8").strip())
 AUTOBUY_TOTAL_RETRY_WINDOW_SEC = float((_cfg("AUTOBUY_TOTAL_RETRY_WINDOW_SEC") or "6.0").strip())
 MAX_ITEMS_PER_SOURCE_SCAN = int((_cfg("MAX_ITEMS_PER_SOURCE_SCAN") or "200").strip())
-AUTOBUY_BURST_FIRST_WAVE = int((_cfg("AUTOBUY_BURST_FIRST_WAVE") or "3").strip())
+AUTOBUY_BURST_FIRST_WAVE = int((_cfg("AUTOBUY_BURST_FIRST_WAVE") or "24").strip())
 USER_ACTION_FETCH_TIMEOUT = float((_cfg("USER_ACTION_FETCH_TIMEOUT") or "2.4").strip())
 
 # ====================== LOGGING ======================
@@ -1625,10 +1625,6 @@ def _autobuy_classify_response(status: int, text: str):
         "already purchased", "already bought", "цена изменилась", "нельзя купить",
         "forbidden", "access denied", "аккаунт продан",
     )
-    validation_required_markers = (
-        "без проверки", "without validation", "without verify", "without verification",
-        "нельзя купить без", "cannot buy without", "can't buy without",
-    )
     queue_markers = (
         "в очереди", "queue", "queued", "попробуйте повторить позднее",
     )
@@ -1644,8 +1640,6 @@ def _autobuy_classify_response(status: int, text: str):
             return "auth", raw[:220], False
         if any(marker in joined for marker in queue_markers):
             return "queue", raw[:220], False
-        if any(marker in joined for marker in validation_required_markers):
-            return "needs_validation", raw[:220], False
         if any(marker in joined for marker in terminal_error_markers):
             return "terminal", raw[:220], False
         return "success", raw[:220], False
@@ -1658,8 +1652,6 @@ def _autobuy_classify_response(status: int, text: str):
 
     if any(marker in joined for marker in queue_markers):
         return "queue", raw[:220], False
-    if any(marker in joined for marker in validation_required_markers):
-        return "needs_validation", raw[:220], False
     if any(marker in joined for marker in success_markers):
         return "success", raw[:220], False
     if any(marker in joined for marker in terminal_error_markers):
@@ -1811,17 +1803,12 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     if not buy_urls:
         return False, "buy_url_not_found"
 
-    payload_no_validation = {
+    payload = {
         "balance_id": LZT_BALANCE_ID,
         "buy_without_validation": 1,
     }
-    payload_with_validation = {
-        "balance_id": LZT_BALANCE_ID,
-        "buy_without_validation": 0,
-    }
     if LZT_SECRET_WORD:
-        payload_no_validation["secret_answer"] = LZT_SECRET_WORD
-        payload_with_validation["secret_answer"] = LZT_SECRET_WORD
+        payload["secret_answer"] = LZT_SECRET_WORD
 
     since_found_ms = None
     if found_perf is not None:
@@ -1829,15 +1816,11 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     max_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS if AUTOBUY_MAX_HTTP_ATTEMPTS > 0 else len(buy_urls)
     attempt_urls = buy_urls[:max_attempts]
-    attempt_targets: list[tuple[str, str, dict]] = []
-    for buy_url in attempt_urls:
-        attempt_targets.append((buy_url, "no_validation", payload_no_validation))
-        attempt_targets.append((buy_url, "with_validation", payload_with_validation))
-    parallel_requests = max(1, min(len(attempt_targets), AUTOBUY_PARALLEL_HTTP if AUTOBUY_PARALLEL_HTTP > 0 else len(attempt_targets)))
+    parallel_requests = max(1, min(len(attempt_urls), AUTOBUY_PARALLEL_HTTP if AUTOBUY_PARALLEL_HTTP > 0 else len(attempt_urls)))
 
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
-        f"since_found_ms={since_found_ms} urls={len(attempt_urls)} attempts={len(attempt_targets)} parallel={parallel_requests} dual_mode=1"
+        f"since_found_ms={since_found_ms} urls={len(attempt_urls)} parallel={parallel_requests} buy_without_validation=1"
     )
 
     session = await get_session()
@@ -1845,7 +1828,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
     headers_json = {**common_headers, "Content-Type": "application/json"}
     headers_form = {**common_headers, "Content-Type": "application/x-www-form-urlencoded"}
 
-    async def _post_buy(idx: int, buy_url: str, request_mode: str, payload: dict):
+    async def _post_buy(idx: int, buy_url: str):
         try:
             bucket, min_interval = _api_limit_bucket("POST", buy_url)
 
@@ -1854,8 +1837,8 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                 body = await resp.text()
                 state, info, force_form = _autobuy_classify_response(resp.status, body)
                 log_autobuy(
-                    f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_targets)} "
-                    f"status={resp.status} state={state} request_mode={request_mode} body_mode=json url={buy_url} info='{_safe_compact(info,220)}'"
+                    f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
+                    f"status={resp.status} state={state} mode=json url={buy_url} info='{_safe_compact(info,220)}'"
                 )
 
             if force_form:
@@ -1865,16 +1848,16 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                     body_form = await resp_form.text()
                     state_form, info_form, _ = _autobuy_classify_response(resp_form.status, body_form)
                     log_autobuy(
-                        f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_targets)} "
-                        f"status={resp_form.status} state={state_form} request_mode={request_mode} body_mode=form url={buy_url} info='{_safe_compact(info_form,220)}'"
+                        f"BUY_DIRECT item_id={item_id} attempt={idx}/{len(attempt_urls)} "
+                        f"status={resp_form.status} state={state_form} mode=form url={buy_url} info='{_safe_compact(info_form,220)}'"
                     )
-                    return idx, buy_url, request_mode, resp_form.status, state_form, info_form
+                    return idx, buy_url, resp_form.status, state_form, info_form
 
-            return idx, buy_url, request_mode, resp.status, state, info
+            return idx, buy_url, resp.status, state, info
         except asyncio.TimeoutError:
-            return idx, buy_url, request_mode, 0, "timeout", "buy_timeout"
+            return idx, buy_url, 0, "timeout", "buy_timeout"
         except Exception as e:
-            return idx, buy_url, request_mode, 0, "error", str(e)
+            return idx, buy_url, 0, "error", str(e)
 
     async with buy_semaphore:
         last_error = "no_attempts"
@@ -1886,16 +1869,15 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
             max_duration_sec = max(0.0, min(max_duration_sec if max_duration_sec > 0 else max_duration_override, max_duration_override))
         deadline = t0 + max_duration_sec if max_duration_sec > 0 else None
 
-        while next_idx < len(attempt_targets) or pending:
+        while next_idx < len(attempt_urls) or pending:
             now = time.perf_counter()
             if deadline and now >= deadline:
                 break
 
             target_parallel = burst_wave if next_idx < burst_wave else parallel_requests
-            while next_idx < len(attempt_targets) and len(pending) < target_parallel:
+            while next_idx < len(attempt_urls) and len(pending) < target_parallel:
                 idx = next_idx + 1
-                buy_url, request_mode, request_payload = attempt_targets[next_idx]
-                pending.add(asyncio.create_task(_post_buy(idx, buy_url, request_mode, request_payload)))
+                pending.add(asyncio.create_task(_post_buy(idx, attempt_urls[next_idx])))
                 next_idx += 1
 
             if not pending:
@@ -1910,7 +1892,7 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                 break
 
             for task in done:
-                t_idx, t_url, request_mode, status, state, info = await task
+                t_idx, t_url, status, state, info = await task
 
                 if state == "success":
                     _remember_autobuy_endpoint(source_url, t_url)
@@ -1924,35 +1906,32 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
                         p.cancel()
                     if pending:
                         await asyncio.gather(*pending, return_exceptions=True)
-                    return False, f"{t_url} ({request_mode}) -> HTTP {status}: ошибка авторизации API ({info})"
+                    return False, f"{t_url} -> HTTP {status}: ошибка авторизации API ({info})"
                 if state == "secret":
                     for p in pending:
                         p.cancel()
                     if pending:
                         await asyncio.gather(*pending, return_exceptions=True)
-                    return False, f"{t_url} ({request_mode}) -> требуется ручная проверка/секретный ответ ({info})"
+                    return False, f"{t_url} -> требуется ручная проверка/секретный ответ ({info})"
                 if state == "terminal":
                     _remember_autobuy_endpoint(source_url, t_url)
                     for p in pending:
                         p.cancel()
                     if pending:
                         await asyncio.gather(*pending, return_exceptions=True)
-                    return False, f"{t_url} ({request_mode}) -> {info}"
+                    return False, f"{t_url} -> {info}"
                 if state == "queue":
                     for p in pending:
                         p.cancel()
                     if pending:
                         await asyncio.gather(*pending, return_exceptions=True)
-                    return False, f"{t_url} ({request_mode}) -> queue: {info}"
-                if state == "needs_validation":
-                    last_error = f"{t_url} ({request_mode}) -> {info}"
-                    continue
+                    return False, f"{t_url} -> queue: {info}"
 
                 if state in {"timeout", "error"}:
-                    last_error = f"{t_url} ({request_mode}) -> {info}"
+                    last_error = f"{t_url} -> {info}"
                     continue
 
-                last_error = f"{t_url} ({request_mode}) -> HTTP {status}: {info}"
+                last_error = f"{t_url} -> HTTP {status}: {info}"
                 if _autobuy_is_terminal_failure(state, status, info):
                     for p in pending:
                         p.cancel()
