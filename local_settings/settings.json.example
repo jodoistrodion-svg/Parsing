@@ -1,9 +1,3 @@
 {
-  "OWNER_ID": 1377985336,
-  "OWNER_IDS": "1377985336",
-  "ACCESS_MODE": "open",
-  "LZT_BALANCE_ID": 20212,
-  "DB_FILE": "bot_data.sqlite",
-  "CHECK_INTERVAL": 5,
-  "SEND_LOT_NOTIFICATIONS": false
+  "note": "deprecated: use .env/.env.example instead"
 }
