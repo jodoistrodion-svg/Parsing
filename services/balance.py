@@ -1,1 +1,0 @@
-"""Balance service placeholder."""
