@@ -8,16 +8,25 @@ import re
 import time
 import random
 import os
+import logging
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+    TelegramUnauthorizedError,
+)
 
 from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
 from bot.ui import render_status_card
+from buyer.queue import UserAutobuyQueueManager
+from services.logging_setup import setup_logging
 
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
 
@@ -116,10 +125,7 @@ USER_ACTION_FETCH_TIMEOUT = float((_cfg("USER_ACTION_FETCH_TIMEOUT") or "2.4").s
 AUTOBUY_LOG_FILE = _cfg("AUTOBUY_LOG_FILE") or "autobuy.log"
 LOG_MAX_BYTES = 15 * 1024 * 1024
 LOG_ROTATE_KEEP = 2
-
-
-def _ts_str() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+logger = setup_logging(AUTOBUY_LOG_FILE, LOG_MAX_BYTES, LOG_ROTATE_KEEP)
 
 
 def _safe_compact(s: str, n: int = 400) -> str:
@@ -129,43 +135,8 @@ def _safe_compact(s: str, n: int = 400) -> str:
     return s[: n - 20] + f"...(len={len(s)})"
 
 
-def _rotate_log_if_needed():
-    try:
-        if not os.path.exists(AUTOBUY_LOG_FILE):
-            return
-        if os.path.getsize(AUTOBUY_LOG_FILE) < LOG_MAX_BYTES:
-            return
-
-        for i in range(LOG_ROTATE_KEEP, 0, -1):
-            src = f"{AUTOBUY_LOG_FILE}.{i}"
-            dst = f"{AUTOBUY_LOG_FILE}.{i+1}"
-            if os.path.exists(src):
-                if i == LOG_ROTATE_KEEP:
-                    try:
-                        os.remove(src)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        os.replace(src, dst)
-                    except Exception:
-                        pass
-
-        try:
-            os.replace(AUTOBUY_LOG_FILE, f"{AUTOBUY_LOG_FILE}.1")
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
 def log_autobuy(line: str):
-    try:
-        _rotate_log_if_needed()
-        with open(AUTOBUY_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{_ts_str()}] {line}\n")
-    except Exception:
-        pass
+    logger.info(line)
 
 
 async def error_reporter_loop():
@@ -488,6 +459,7 @@ user_hunter_mode = defaultdict(lambda: "off")  # off/classic
 user_seen_items = defaultdict(set)
 user_buy_attempted = defaultdict(set)
 user_buy_inflight = defaultdict(set)
+autobuy_queue_manager = UserAutobuyQueueManager(maxsize=2500)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 user_hunter_start_locks: dict[int, asyncio.Lock] = {}
 user_history_reset_pending = defaultdict(lambda: False)
@@ -1260,9 +1232,10 @@ async def fetch_items_raw(url: str, request_timeout: float | None = None):
 
 async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX, request_timeout: float | None = None):
     attempt = 0
+    retries = max(1, int(max_retries))
     delay = RETRY_BASE_DELAY
 
-    while attempt < max_retries:
+    while attempt < retries:
         attempt += 1
         try:
             async with semaphore:
@@ -1276,7 +1249,7 @@ async def fetch_with_retry(url: str, max_retries: int = RETRY_MAX, request_timeo
         if status in (400, 401, 403, 404):
             return [], err
 
-        if attempt >= max_retries:
+        if attempt >= retries:
             return [], err
 
         jitter = random.uniform(0, delay * 0.2)
@@ -1758,6 +1731,9 @@ def _format_item_time_human(value) -> str:
 
 
 async def _send_buy_result_immediately(chat_id: int, user_id: int, text: str):
+    if bot is None:
+        enqueue_hunter_notification(user_id, chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+        return
     try:
         await bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
         return
@@ -2072,27 +2048,17 @@ async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item
     await _send_buy_result_immediately(chat_id, user_id, buy_result_text)
 
 
+async def _autobuy_queue_handler(user_id: int, payload: tuple[int, dict, dict, float]):
+    chat_id, source, item, found_perf = payload
+    await _run_autobuy_and_notify(user_id, chat_id, source, item, found_perf)
+
+
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     user_buy_inflight[user_id].clear()
     ensure_notify_worker(user_id)
     no_lots_streak = 0
     cycle_num = 0
-    pending_autobuy_tasks: set[asyncio.Task] = set()
-
-    def _track_task(task: asyncio.Task):
-        pending_autobuy_tasks.add(task)
-
-        def _on_done(t: asyncio.Task):
-            pending_autobuy_tasks.discard(t)
-            try:
-                t.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                log_autobuy(f"AUTOBUY_TASK_ERR user_id={user_id} err='{_safe_compact(str(e),320)}'")
-
-        task.add_done_callback(_on_done)
 
     while user_search_active[user_id]:
         cycle_num += 1
@@ -2124,8 +2090,11 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
 
                     if source.get("autobuy", False) and key not in user_buy_attempted[user_id] and key not in user_buy_inflight[user_id]:
                         user_buy_inflight[user_id].add(key)
-                        t = asyncio.create_task(_run_autobuy_and_notify(user_id, chat_id, source, item, found_perf))
-                        _track_task(t)
+                        await autobuy_queue_manager.enqueue(
+                            user_id,
+                            (chat_id, source, item, found_perf),
+                            _autobuy_queue_handler,
+                        )
 
                     user_seen_items[user_id].add(key)
                     seen_batch.append(key)
@@ -2161,9 +2130,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             log_autobuy(f"HUNTER_EXC user_id={user_id} err='{_safe_compact(str(e),400)}'")
             await asyncio.sleep(max(await user_hunter_interval(user_id), 0.01))
 
-    if pending_autobuy_tasks:
-        for task in list(pending_autobuy_tasks):
-            task.cancel()
+    await autobuy_queue_manager.stop_user(user_id)
     user_buy_inflight[user_id].clear()
 
 
@@ -2604,7 +2571,7 @@ async def buttons_handler(message: types.Message):
 # ====================== RUN ======================
 async def main():
     global bot
-    print(f"[BOT] Start: classic hunter + balance_id={LZT_BALANCE_ID}")
+    logger.info("BOT_START mode=classic balance_id=%s", LZT_BALANCE_ID)
 
     if not has_valid_telegram_token(API_TOKEN):
         raise RuntimeError("Некорректный API_TOKEN: бот не может быть запущен")
@@ -2614,16 +2581,23 @@ async def main():
     # Если у бота раньше был включён webhook (например, после деплоя на хостинг),
     # polling не будет получать новые апдейты, пока webhook не удалён.
     try:
-        await bot.delete_webhook(drop_pending_updates=False)
+        await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
-        print(f"[BOT] WARN: cannot delete webhook: {e}")
+        logger.warning("WEBHOOK_DELETE_ERR err=%s", _safe_compact(str(e), 180))
 
     await init_db()
     asyncio.create_task(error_reporter_loop())
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    except TelegramUnauthorizedError:
+        logger.exception("POLLING_UNAUTHORIZED invalid telegram token")
+        raise
+    except TelegramConflictError:
+        logger.exception("POLLING_CONFLICT another polling/webhook instance is running")
+        raise
     finally:
+        await autobuy_queue_manager.shutdown()
         await close_session()
         await db_close()
         if bot is not None and getattr(bot, "session", None) is not None:
