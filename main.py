@@ -16,19 +16,12 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramForbiddenError
 
-from pathlib import Path
 from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
 from bot.ui import render_status_card
 
-# ====================== ENV / LOCAL SETTINGS ======================
-ROOT_DIR = Path(__file__).resolve().parent
-LOCAL_SETTINGS_DIR = ROOT_DIR / "local_settings"
-TOKEN_FILES = {
-    "API_TOKEN": LOCAL_SETTINGS_DIR / "tokens" / "telegram_token.txt",
-    "LZT_API_KEY": LOCAL_SETTINGS_DIR / "tokens" / "lzt_api_key.txt",
-}
+from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
 
-
+# ====================== ENV ======================
 def _normalize_telegram_token(raw: str | None) -> str:
     token = (raw or "").strip().strip('"').strip("'")
     if token.lower().startswith("bot") and re.match(r"^bot\d{6,12}:", token, flags=re.IGNORECASE):
@@ -36,46 +29,15 @@ def _normalize_telegram_token(raw: str | None) -> str:
     return token
 
 
-def _read_token_file(name: str) -> str:
-    path = TOKEN_FILES[name]
-    try:
-        return path.read_text(encoding="utf-8").strip().strip('"').strip("'")
-    except FileNotFoundError:
-        return ""
-
-
-def _load_local_json_settings() -> dict:
-    settings_path = LOCAL_SETTINGS_DIR / "settings.json"
-    try:
-        raw = settings_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return {}
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        return {}
-
-
-LOCAL_JSON_SETTINGS = _load_local_json_settings()
-
-
-def _cfg(name: str, default: str = "") -> str:
+def _cfg(name: str, fallback: str = "") -> str:
     env_val = os.getenv(name)
     if env_val is not None and env_val.strip() != "":
         return env_val.strip()
-    json_val = LOCAL_JSON_SETTINGS.get(name)
-    if json_val is None:
-        return default
-    if isinstance(json_val, bool):
-        return "1" if json_val else "0"
-    return str(json_val).strip()
+    return fallback
 
 
-API_TOKEN = _normalize_telegram_token(_cfg("API_TOKEN") or _read_token_file("API_TOKEN"))
-LZT_API_KEY = _cfg("LZT_API_KEY") or _read_token_file("LZT_API_KEY")
+API_TOKEN = _normalize_telegram_token(_cfg("API_TOKEN", _API_TOKEN))
+LZT_API_KEY = _cfg("LZT_API_KEY", _LZT_API_KEY)
 LZT_BALANCE_ID = int((_cfg("LZT_BALANCE_ID", "20212") or "20212").strip())
 
 bot: Bot | None = None
