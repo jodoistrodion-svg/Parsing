@@ -1,5 +1,10 @@
 import os
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 def _read_env(*names: str, default: str = "") -> str:
     for name in names:
