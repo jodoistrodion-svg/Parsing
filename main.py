@@ -105,12 +105,12 @@ USER_PAGE_SIZE = 14
 MAX_URL_NAME_LEN = 64
 
 TG_SEND_DELAY = float((_cfg("TG_SEND_DELAY") or "0.01").strip())
-AUTOBUY_RETRY_ATTEMPTS = int((_cfg("AUTOBUY_RETRY_ATTEMPTS") or "0").strip())
+AUTOBUY_RETRY_ATTEMPTS = int((_cfg("AUTOBUY_RETRY_ATTEMPTS") or "2").strip())
 AUTOBUY_RETRY_MIN_DELAY = float((_cfg("AUTOBUY_RETRY_MIN_DELAY") or "0.03").strip())
 AUTOBUY_RETRY_MAX_DELAY = float((_cfg("AUTOBUY_RETRY_MAX_DELAY") or "0.12").strip())
 AUTOBUY_QUEUE_RETRY_MIN_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MIN_DELAY") or "0.06").strip())
 AUTOBUY_QUEUE_RETRY_MAX_DELAY = float((_cfg("AUTOBUY_QUEUE_RETRY_MAX_DELAY") or "0.18").strip())
-FAST_AUTOBUY_TIMEOUT = float((_cfg("FAST_AUTOBUY_TIMEOUT") or "0.45").strip())
+FAST_AUTOBUY_TIMEOUT = float((_cfg("FAST_AUTOBUY_TIMEOUT") or "2.4").strip())
 AUTOBUY_URL_LIMIT = int((_cfg("AUTOBUY_URL_LIMIT") or "0").strip())
 AUTOBUY_MAX_HTTP_ATTEMPTS = int((_cfg("AUTOBUY_MAX_HTTP_ATTEMPTS") or "0").strip())
 AUTOBUY_PARALLEL_HTTP = int((_cfg("AUTOBUY_PARALLEL_HTTP") or "24").strip())
@@ -1816,7 +1816,11 @@ async def _try_autobuy_once(source: dict, item: dict, found_perf: float | None =
 
     max_attempts = AUTOBUY_MAX_HTTP_ATTEMPTS if AUTOBUY_MAX_HTTP_ATTEMPTS > 0 else len(buy_urls)
     attempt_urls = buy_urls[:max_attempts]
-    parallel_requests = max(1, min(len(attempt_urls), AUTOBUY_PARALLEL_HTTP if AUTOBUY_PARALLEL_HTTP > 0 else len(attempt_urls)))
+    max_parallel = AUTOBUY_PARALLEL_HTTP if AUTOBUY_PARALLEL_HTTP > 0 else len(attempt_urls)
+    parallel_requests = max(1, min(len(attempt_urls), max_parallel))
+    if len(attempt_urls) >= 2:
+        # Для fast-buy/confirm-buy всегда держим настоящий race 2 запросов.
+        parallel_requests = max(2, parallel_requests)
 
     log_autobuy(
         f"BUY_START item_id={item_id} src='{_safe_compact(source_name,120)}' "
@@ -1959,17 +1963,33 @@ def _remaining_autobuy_window_sec(found_perf: float | None) -> float | None:
 
 
 async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = None):
-    max_attempt_window = _remaining_autobuy_window_sec(found_perf)
-    if max_attempt_window is not None and max_attempt_window <= 0:
-        max_attempt_window = None
+    retry_count = max(0, min(AUTOBUY_RETRY_ATTEMPTS, 2))
+    total_attempts = 1 + retry_count
+    last_info = "autobuy_not_attempted"
 
-    bought, info = await _try_autobuy_once(
-        source,
-        item,
-        found_perf=found_perf,
-        max_duration_override=max_attempt_window,
-    )
-    return bought, f"attempt=1/1 | {info}"
+    for attempt_no in range(1, total_attempts + 1):
+        max_attempt_window = _remaining_autobuy_window_sec(found_perf)
+        if max_attempt_window is not None and max_attempt_window <= 0:
+            break
+
+        bought, info = await _try_autobuy_once(
+            source,
+            item,
+            found_perf=found_perf,
+            max_duration_override=max_attempt_window,
+        )
+        last_info = f"attempt={attempt_no}/{total_attempts} | {info}"
+
+        if bought:
+            return True, last_info
+        if not _autobuy_should_retry_by_info(str(info)):
+            return False, last_info
+        if attempt_no >= total_attempts:
+            return False, last_info
+
+        await asyncio.sleep(_autobuy_retry_delay(is_queue=("queue" in str(info).lower())))
+
+    return False, last_info
 
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
