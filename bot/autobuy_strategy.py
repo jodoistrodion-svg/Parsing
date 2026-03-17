@@ -10,8 +10,8 @@ def build_buy_urls(source_url: str, item_id: int) -> list[str]:
     _ = source_url  # kept for backward compatible signature
     base = "https://prod-api.lzt.market"
     return [
-        f"{base}/{item_id}/confirm-buy",
         f"{base}/{item_id}/fast-buy",
+        f"{base}/{item_id}/confirm-buy",
     ]
 
 
