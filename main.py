@@ -25,6 +25,7 @@ from aiogram.exceptions import (
 
 from bot.autobuy_strategy import build_buy_urls, prioritize_buy_urls
 from bot.ui import render_status_card
+from buyer.queue import UserAutobuyQueueManager
 from services.logging_setup import setup_logging
 
 from config import API_TOKEN as _API_TOKEN, LZT_API_KEY as _LZT_API_KEY
@@ -458,6 +459,7 @@ user_hunter_mode = defaultdict(lambda: "off")  # off/classic
 user_seen_items = defaultdict(set)
 user_buy_attempted = defaultdict(set)
 user_buy_inflight = defaultdict(set)
+autobuy_queue_manager = UserAutobuyQueueManager(maxsize=2500)
 user_hunter_tasks: dict[int, asyncio.Task] = {}
 user_hunter_start_locks: dict[int, asyncio.Lock] = {}
 user_history_reset_pending = defaultdict(lambda: False)
@@ -478,8 +480,16 @@ user_pending_rename_url = defaultdict(lambda: None)
 user_page_state = defaultdict(lambda: {"ctx": None, "page": 0})
 
 autobuy_endpoint_cache: dict[str, list[str]] = {}
+buy_locks: dict[str, asyncio.Lock] = {}
 buy_semaphore = asyncio.Semaphore(int((os.getenv("BUY_SEMAPHORE") or "128").strip()))
 
+
+def get_buy_lock(item_key: str) -> asyncio.Lock:
+    lock = buy_locks.get(item_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        buy_locks[item_key] = lock
+    return lock
 
 
 def get_user_hunter_start_lock(user_id: int) -> asyncio.Lock:
@@ -1176,7 +1186,7 @@ async def get_session():
     global _global_session
     if _global_session is None or _global_session.closed:
         timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT, connect=3, sock_connect=3, sock_read=FETCH_TIMEOUT)
-        connector = aiohttp.TCPConnector(limit=100, limit_per_host=100, ttl_dns_cache=300, enable_cleanup_closed=True)
+        connector = aiohttp.TCPConnector(limit=256, limit_per_host=128, ttl_dns_cache=300, enable_cleanup_closed=True)
         _global_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _global_session
 
@@ -1959,17 +1969,37 @@ def _remaining_autobuy_window_sec(found_perf: float | None) -> float | None:
 
 
 async def try_autobuy_item(source: dict, item: dict, found_perf: float | None = None):
-    max_attempt_window = _remaining_autobuy_window_sec(found_perf)
-    if max_attempt_window is not None and max_attempt_window <= 0:
-        max_attempt_window = None
+    item_key = make_item_key(item)
+    lock = get_buy_lock(item_key)
 
-    bought, info = await _try_autobuy_once(
-        source,
-        item,
-        found_perf=found_perf,
-        max_duration_override=max_attempt_window,
-    )
-    return bought, f"attempt=1/1 | {info}"
+    async with lock:
+        attempts_limit = AUTOBUY_RETRY_ATTEMPTS if AUTOBUY_RETRY_ATTEMPTS > 0 else None
+        last_info = "autobuy_no_attempts"
+
+        i = 0
+        while True:
+            i += 1
+            max_attempt_window = _remaining_autobuy_window_sec(found_perf)
+            if max_attempt_window is not None and max_attempt_window <= 0:
+                max_attempt_window = None
+
+            bought, info = await _try_autobuy_once(source, item, found_perf=found_perf, max_duration_override=max_attempt_window)
+            last_info = str(info)
+            if bought:
+                total = attempts_limit if attempts_limit is not None else "∞"
+                return True, f"attempt={i}/{total} | {info}"
+
+            if not _autobuy_should_retry_by_info(last_info):
+                total = attempts_limit if attempts_limit is not None else "∞"
+                return False, f"attempt={i}/{total} | {info}"
+
+            if attempts_limit is not None and i >= attempts_limit:
+                return False, f"attempt={i}/{attempts_limit} | {last_info}"
+
+            is_queue = "queue" in last_info.lower()
+            delay = _autobuy_retry_delay(is_queue=is_queue)
+            if delay > 0:
+                await asyncio.sleep(delay)
 
 
 async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item: dict, found_perf: float):
@@ -2018,6 +2048,11 @@ async def _run_autobuy_and_notify(user_id: int, chat_id: int, source: dict, item
     await _send_buy_result_immediately(chat_id, user_id, buy_result_text)
 
 
+async def _autobuy_queue_handler(user_id: int, payload: tuple[int, dict, dict, float]):
+    chat_id, source, item, found_perf = payload
+    await _run_autobuy_and_notify(user_id, chat_id, source, item, found_perf)
+
+
 async def hunter_loop_for_user(user_id: int, chat_id: int):
     await load_user_data(user_id)
     user_buy_inflight[user_id].clear()
@@ -2053,20 +2088,22 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
                     found_perf = time.perf_counter()
                     src_name = source.get("name") or "UNKNOWN"
 
-                    is_autobuy_source = bool(source.get("autobuy", False))
-                    if is_autobuy_source and key not in user_buy_attempted[user_id] and key not in user_buy_inflight[user_id]:
+                    if source.get("autobuy", False) and key not in user_buy_attempted[user_id] and key not in user_buy_inflight[user_id]:
                         user_buy_inflight[user_id].add(key)
-                        asyncio.create_task(_run_autobuy_and_notify(user_id, chat_id, source, item, found_perf))
+                        await autobuy_queue_manager.enqueue(
+                            user_id,
+                            (chat_id, source, item, found_perf),
+                            _autobuy_queue_handler,
+                        )
 
                     user_seen_items[user_id].add(key)
                     seen_batch.append(key)
                     new_items_processed += 1
 
-                    if not is_autobuy_source:
-                        try:
-                            await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
-                        except Exception as e:
-                            log_autobuy(f"LOT_NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
+                    try:
+                        await send_bot_message(chat_id, make_card(item, src_name), parse_mode="HTML", disable_web_page_preview=True)
+                    except Exception as e:
+                        log_autobuy(f"LOT_NOTIFY_SEND_ERR user_id={user_id} err='{_safe_compact(str(e),240)}'")
 
                 if MAX_NEW_ITEMS_PER_CYCLE > 0 and new_items_processed >= MAX_NEW_ITEMS_PER_CYCLE:
                     break
@@ -2093,6 +2130,7 @@ async def hunter_loop_for_user(user_id: int, chat_id: int):
             log_autobuy(f"HUNTER_EXC user_id={user_id} err='{_safe_compact(str(e),400)}'")
             await asyncio.sleep(max(await user_hunter_interval(user_id), 0.01))
 
+    await autobuy_queue_manager.stop_user(user_id)
     user_buy_inflight[user_id].clear()
 
 
@@ -2559,6 +2597,7 @@ async def main():
         logger.exception("POLLING_CONFLICT another polling/webhook instance is running")
         raise
     finally:
+        await autobuy_queue_manager.shutdown()
         await close_session()
         await db_close()
         if bot is not None and getattr(bot, "session", None) is not None:
