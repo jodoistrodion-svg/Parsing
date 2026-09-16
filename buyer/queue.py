@@ -11,10 +11,22 @@ JobHandler = Callable[[int, Any], Awaitable[None]]
 
 
 class UserAutobuyQueueManager:
-    def __init__(self, maxsize: int = 2000):
+    """Per-user autobuy queue with concurrent hot-path workers.
+
+    The original queue had one worker per user, which serialized different lots.
+    That added latency when several fresh lots arrived together even though the
+    actual buyer already supports concurrent HTTP attempts. The queue now keeps
+    the same non-blocking enqueue semantics but runs a small worker pool per
+    user. A job for the same item is still protected by the item-level lock in
+    the buyer, so increasing worker concurrency does not create duplicate
+    purchase attempts for one item.
+    """
+
+    def __init__(self, maxsize: int = 2000, workers_per_user: int = 8):
         self._maxsize = maxsize
+        self._workers_per_user = max(1, int(workers_per_user))
         self._queues: dict[int, asyncio.Queue] = {}
-        self._workers: dict[int, asyncio.Task] = {}
+        self._workers: dict[int, list[asyncio.Task]] = {}
         self._lock = asyncio.Lock()
 
     def _get_queue(self, user_id: int) -> asyncio.Queue:
@@ -26,10 +38,11 @@ class UserAutobuyQueueManager:
 
     async def ensure_worker(self, user_id: int, handler: JobHandler):
         async with self._lock:
-            task = self._workers.get(user_id)
-            if task and not task.done():
-                return
-            self._workers[user_id] = asyncio.create_task(self._worker_loop(user_id, handler))
+            workers = [t for t in self._workers.get(user_id, []) if not t.done()]
+            self._workers[user_id] = workers
+            missing = self._workers_per_user - len(workers)
+            for _ in range(max(0, missing)):
+                workers.append(asyncio.create_task(self._worker_loop(user_id, handler)))
 
     async def enqueue(self, user_id: int, payload: Any, handler: JobHandler):
         await self.ensure_worker(user_id, handler)
@@ -54,10 +67,11 @@ class UserAutobuyQueueManager:
 
     async def stop_user(self, user_id: int):
         async with self._lock:
-            task = self._workers.pop(user_id, None)
-        if task:
+            workers = self._workers.pop(user_id, [])
+        for task in workers:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def shutdown(self):
         user_ids = list(self._workers.keys())
