@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from time import perf_counter
@@ -25,7 +24,7 @@ class PipelineStats:
     queued: int = 0
 
 
-FetchSource = Callable[[dict[str, Any]], Awaitable[tuple[dict[str, Any], list[dict[str, Any]], str | None]]]
+FetchSource = Callable[..., AsyncIterator[tuple[dict[str, Any], list[dict[str, Any]], str | None]]]
 EnqueueAutobuy = Callable[[dict[str, Any], dict[str, Any], float], Awaitable[None]]
 MarkSeen = Callable[[str], Awaitable[None]]
 IsSeen = Callable[[str], bool]
@@ -48,7 +47,7 @@ class DiscoveryPipeline:
     def __init__(
         self,
         *,
-        fetch_sources: Callable[..., AsyncIterator[tuple[dict[str, Any], list[dict[str, Any]], str | None]]],
+        fetch_sources: FetchSource,
         make_key: MakeKey,
         is_seen: IsSeen,
         is_attempted: IsAttempted,
@@ -68,15 +67,29 @@ class DiscoveryPipeline:
         self._max_items_per_source = max(0, int(max_items_per_source))
         self._max_new_items_per_cycle = max(0, int(max_new_items_per_cycle))
 
-    async def run(self, user_id: int, *, include_non_autobuy: bool) -> tuple[list[PipelineItem], PipelineStats, list[tuple[str, str, str]]]:
+    async def run(
+        self,
+        user_id: int,
+        *,
+        include_non_autobuy: bool,
+    ) -> tuple[list[PipelineItem], PipelineStats, list[tuple[str, str, str]]]:
         stats = PipelineStats()
         accepted: list[PipelineItem] = []
         errors: list[tuple[str, str, str]] = []
         seen_this_cycle: set[str] = set()
 
-        async for source, items, err in self._fetch_sources(user_id, include_non_autobuy=include_non_autobuy):
+        async for source, items, err in self._fetch_sources(
+            user_id,
+            include_non_autobuy=include_non_autobuy,
+        ):
             if err:
-                errors.append((str(source.get("name") or "UNKNOWN"), str(source.get("url") or "UNKNOWN"), str(err)))
+                errors.append(
+                    (
+                        str(source.get("name") or "UNKNOWN"),
+                        str(source.get("url") or "UNKNOWN"),
+                        str(err),
+                    )
+                )
                 continue
             if not items:
                 continue
@@ -109,13 +122,15 @@ class DiscoveryPipeline:
 
                 found_perf = perf_counter()
                 seen_this_cycle.add(key)
-                await self._mark_seen(key)
-                stats.accepted += 1
 
+                # Queue first. If queueing fails, the lot must not become
+                # permanently invisible as a side effect of a failed enqueue.
                 if source.get("autobuy", False) and not self._is_attempted(key):
                     await self._enqueue_autobuy(source, item, found_perf)
                     stats.queued += 1
 
+                await self._mark_seen(key)
+                stats.accepted += 1
                 accepted.append(PipelineItem(item=item, source=source, found_perf=found_perf))
 
         return accepted, stats, errors
