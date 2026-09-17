@@ -6,10 +6,12 @@ from market.discovery import iter_sources_split
 def test_autobuy_sources_run_as_first_concurrent_wave():
     async def scenario():
         started = []
+        started_event = asyncio.Event()
         release = asyncio.Event()
 
         async def fetcher(source):
             started.append(source["name"])
+            started_event.set()
             await release.wait()
             return source, [{"id": 1}], None
 
@@ -21,7 +23,7 @@ def test_autobuy_sources_run_as_first_concurrent_wave():
 
         iterator = iter_sources_split(sources, fetcher, include_non_autobuy=False)
         task = asyncio.create_task(iterator.__anext__())
-        await asyncio.sleep(0)
+        await asyncio.wait_for(started_event.wait(), timeout=1)
         first_wave = set(started)
         release.set()
         try:
